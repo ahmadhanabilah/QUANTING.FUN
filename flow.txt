@@ -1,0 +1,99 @@
+/bot
+  /common
+    enums.py
+    state.py
+    decision.py
+    event_bus.py
+    calc_spread.py
+  /maker
+    maker_bot.py
+    logic_entry_exit.py
+    logic_order_update.py
+  /hedge
+    hedge_bot.py
+  /venues
+    lighter.py
+    extended.py
+
+
+
+# ------------------------------------------
+# 1) EXIT LOGIC (highest priority)
+# ------------------------------------------
+
+# hasLE  → Lighter long, Extended short
+if invL > 0 and invE < 0:
+    if spreadTT_EL + spreadInv > spreadTP:
+        action = TAKE_EXT_LONG + TAKE_LIG_SHORT
+        return action
+    if spreadMT_EL + spreadInv > spreadTP:
+        action = MAKE_EXT_LONG
+        return action
+    if spreadTM_EL + spreadInv > spreadTP:
+        action = MAKE_LIG_SHORT
+        return action
+
+# hasEL  → Extended long, Lighter short
+if invE > 0 and invL < 0:
+    if spreadTT_LE + spreadInv > spreadTP:
+        action = TAKE_LIG_LONG + TAKE_EXT_SHORT
+        return action
+    if spreadMT_LE + spreadInv > spreadTP:
+        action = MAKE_LIG_LONG
+        return action
+    if spreadTM_LE + spreadInv > spreadTP:
+        action = MAKE_EXT_SHORT
+        return action
+
+
+# ------------------------------------------
+# 2) ENTRY LOGIC (only if no position)
+# ------------------------------------------
+
+if invL == 0 and invE == 0:
+
+    # Candidate spreads
+    candidates = {
+        "TT_LE": spreadTT_LE,
+        "TT_EL": spreadTT_EL,
+        "MT_LE": spreadMT_LE,
+        "MT_EL": spreadMT_EL,
+        "TM_LE": spreadTM_LE,
+        "TM_EL": spreadTM_EL,
+    }
+
+    # Pick highest among all TT + MT + TM
+    best = max(candidates, key=candidates.get)
+    best_value = candidates[best]
+
+    if best_value > minSpread:
+        if best == "TT_LE":
+            action = TAKE_LIG_LONG + TAKE_EXT_SHORT
+        elif best == "TT_EL":
+            action = TAKE_EXT_LONG + TAKE_LIG_SHORT
+        elif best == "MT_LE":
+            action = MAKE_LIG_LONG
+        elif best == "MT_EL":
+            action = MAKE_EXT_LONG
+        elif best == "TM_LE":
+            action = MAKE_LIG_SHORT
+        elif best == "TM_EL":
+            action = MAKE_EXT_SHORT
+
+        return action
+
+
+# ------------------------------------------
+# 3) NOTHING TO DO
+# ------------------------------------------
+return NONE
+
+
+
+
+
+
+
+Hedge Bot
+on_maker_fill → hedge immediately (market) on opposite venue
+on_exposure_drift → small market correction

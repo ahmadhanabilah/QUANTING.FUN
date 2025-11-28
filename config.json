@@ -1,0 +1,43 @@
+{
+  "symbols": [
+    {
+      "SYMBOL_LIGHTER": "MON",
+      "SYMBOL_EXTENDED": "MON-USD",
+      "MIN_SPREAD": -0.1,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "ORDER_VALUE": 25,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": true,
+      "DEDUP_OB": true
+    },
+    {
+      "SYMBOL_LIGHTER": "RESOLV",
+      "SYMBOL_EXTENDED": "RESOLV-USD",
+      "MIN_SPREAD": 0.4,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "ORDER_VALUE": 25,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADES": null,
+      "MIN_HITS": 3,
+      "TEST_MODE": false,
+      "DEDUP_OB": false
+    },
+    {
+      "SYMBOL_LIGHTER": "BTC",
+      "SYMBOL_EXTENDED": "BTC-USD",
+      "MIN_SPREAD": 0,
+      "SPREAD_TP": 0.1,
+      "REPRICE_TICK": 0,
+      "ORDER_VALUE": 25,
+      "MAX_POSITION_VALUE": 100,
+      "MAX_TRADES": 2,
+      "MIN_HITS": 3,
+      "TEST_MODE": false,
+      "DEDUP_OB": true
+    }
+  ]
+}

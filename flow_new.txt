@@ -1,0 +1,59 @@
+Flow overview (maker + hedge)
+------------------------------
+
+Startup (run_all.py)
+- Load .env.
+- Configure log files: spread.log, maker.log, hedge.log (prepend newest), realtime.log overwrite handler.
+- Create shared State, venues (LighterWS, ExtendedWS), MakerBot. (Hedge disabled in TT-only run_all.)
+- Hedge runner start order:
+  1) Set callbacks (OB, maker-only deltas, inventory deltas, position callbacks).
+  2) Start L/E streams concurrently.
+  3) Wait for both orderbooks ready.
+  4) Compute hedge min-qty threshold = max(min_size, min_size_change, min_value/price) across both venues using current mid prices.
+  5) Load initial positions via REST (qty + avg entry), seed unhedged based on initial net (invL+invE), log seed info.
+  6) Attempt initial hedge if unhedged >= threshold.
+  7) Set state.hedge_seeded=True so MakerBot can begin.
+
+Hedge flow (HedgeBot)
+- Input streams:
+  * Maker-only deltas from account streams: Lighter maker trades (account_all_trades filtered to maker), Extended FILLED LIMIT post_only orders.
+  * Inventory deltas (maker+taker) keep State invL/invE aligned for maker decisions.
+- Accumulates unhedged_L / unhedged_E with incoming maker deltas.
+- Threshold: only hedge when |unhedged| >= min_qty_threshold (derived from venue mins/values).
+- Action: send market on opposite venue via send_with_retry (up to 100 attempts, 100ms delay). Uses actual returned filled_qty to subtract from unhedged. Latency logged. Telegram notify on exhaust.
+- OB readiness is required before hedging attempts.
+
+Maker flow (MakerBot)
+- Runs on every OB update after hedge_seeded.
+- Spreads computed via calc_spreads using state inv/entry (includes INV spread).
+- Decision logic:
+  * Exits first (TT, MT, TM) based on current inventory direction (LE or EL).
+  * Entries next: TT priority if enabled; otherwise best MT/TM. Entries allowed even when not flat, but blocked when max_position_value is hit (entry decisions nulled).
+  * Active NONE with live order -> convert to CANCEL.
+- Execution:
+  * MAKE: place limit sized as order_value/price; repriceTick gate; cancel/replace as needed; min size/value guards.
+  * TAKE: market sized as order_value/price; min size/value guards.
+  * CANCEL/NONE: cancel live maker if present.
+- Logging:
+  * realtime.log: spreads, decision, both OBs, MAX_VALUE, invL/E + entries, INV spread, unhedged_L/E.
+  * maker.log: decisions only when an order send/cancel is actually executed; live payloads with latency.
+  * spread.log: standard spread info (unchanged).
+
+Venue helpers
+- LighterWS:
+  * OB stream.
+  * Account stream: wss account_all_trades with auth + ping/pong; filters maker trades for maker delta; all trades for inventory delta. Uses min_base_amount/min_quote_amount as min_size/min_value.
+  * REST load_initial_position for qty/avg_entry.
+  * send_market returns actual formatted filled_qty.
+- ExtendedWS:
+  * OB stream.
+  * Account stream: maker delta from FILLED LIMIT post_only on target market; inventory delta from all FILLED orders.
+  * REST load_initial_position for qty/avg_entry.
+  * Min constraints from tradingConfig: minOrderSize, minOrderSizeChange, minOrderValue (converted via price).
+  * send_market returns actual formatted filled_qty.
+
+State contents
+- invL, invE; entry_price_L, entry_price_E
+- active_order_id/venue/side
+- current_direction (maker bias), hedge_seeded flag
+- unhedged_L, unhedged_E (maker deltas pending hedge)
