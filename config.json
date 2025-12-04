@@ -115,6 +115,21 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true
+    },
+    {
+      "SYMBOL_LIGHTER": "GRASS",
+      "SYMBOL_EXTENDED": "GRASS-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false
     }
   ]
 }

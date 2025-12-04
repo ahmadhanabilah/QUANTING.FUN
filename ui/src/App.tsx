@@ -30,7 +30,7 @@ type BotCardModel = {
   E: string;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:5001`;
+const API_BASE = "http://46.250.248.201:5001";
 function buildAuth(user: string, pass: string) {
   const token = btoa(unescape(encodeURIComponent(`${user}:${pass}`)));
   return { Authorization: `Basic ${token}` };

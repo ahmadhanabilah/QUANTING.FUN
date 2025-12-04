@@ -42,6 +42,18 @@ class TTBot:
         self.max_trade_value = max_trade_value
         self.max_of_ob = max_of_ob
         self.test_mode = test_mode
+
+        # Hard guard: if dollar cap is below venue min value, stop immediately
+        try:
+            min_value_l = getattr(self.L, "min_value", 0) or 0
+            if self.max_trade_value is not None and min_value_l and self.max_trade_value < min_value_l:
+                logger_maker.error(
+                    f"MAX_TRADE_VALUE ({self.max_trade_value}) below Lighter min_value ({min_value_l}); stopping bot"
+                )
+                raise RuntimeError("max_trade_value below lighter min_value")
+        except Exception:
+            # if check fails unexpectedly, allow startup to continue
+            pass
         self._exec_lock = asyncio.Lock()
         self._last_spreads = {}
         self._pending_tt = None  # tracks pending TT fills per venue
@@ -1051,33 +1063,13 @@ class TTBot:
         min_size_L = getattr(self.L, "min_size", 0) or 0
         min_size_E = getattr(self.E, "min_size", 0) or 0
         min_value_L = getattr(self.L, "min_value", 0) or 0
-        min_value_E = getattr(self.E, "min_value", 0) or 0
+        # Extended currently has no min_value; reuse lighter's min_value for both legs
+        min_value_E = getattr(self.E, "min_value", 0) or getattr(self.L, "min_value", 0) or 0
         min_size_change_E = getattr(self.E, "min_size_change", 0) or 0
         max_trade_value = self.max_trade_value
         max_of_ob = self.max_of_ob or 0.0
 
-        base_candidates = [min_size_L, min_size_E]
-        if min_value_L:
-            if price_L_long_exec:
-                base_candidates.append(min_value_L / price_L_long_exec)
-            if price_L_short_exec:
-                base_candidates.append(min_value_L / price_L_short_exec)
-        if min_value_E:
-            if price_E_long_exec:
-                base_candidates.append(min_value_E / price_E_long_exec)
-            if price_E_short_exec:
-                base_candidates.append(min_value_E / price_E_short_exec)
-        shared = max(base_candidates) if base_candidates else 0.0
-
-        def _apply_step(val, step):
-            if step and step > 0:
-                return math.ceil(val / step) * step
-            return val
-
-        # ensure extended min_size_change is honored up front (stepwise)
-        shared = _apply_step(max(shared, min_size_change_E), min_size_change_E)
-
-        # cap by 30% (configurable) of available OB sizes on both legs
+        # cap by % of OB first (priority 1)
         def _ob_cap():
             try:
                 if reason in ("TT_LE", "WARM_UP_LE"):
@@ -1090,48 +1082,52 @@ class TTBot:
             except Exception:
                 return 0.0
 
-        ob_cap = _ob_cap() if max_of_ob else 0.0
-        if ob_cap:
-            shared = min(shared, ob_cap) if shared else ob_cap
+        shared = _ob_cap() if max_of_ob else 0.0
+        if not shared:
+            return 0.0
 
-        def _snap_size(venue_api, raw_size, price):
-            """Apply venue rounding and min size/change (min_value only for lighter leg)."""
-            size = raw_size
-            if hasattr(venue_api, "_fmt_decimal_int") and hasattr(venue_api, "size_decimals"):
-                rounded = venue_api._fmt_decimal_int(raw_size, venue_api.size_decimals or 0)
-                size = rounded / (10 ** (venue_api.size_decimals or 0))
-            elif hasattr(venue_api, "_format_qty"):
-                try:
-                    size = float(venue_api._format_qty(raw_size))
-                except Exception:
-                    size = raw_size
-            min_size = getattr(venue_api, "min_size", 0) or 0
-            min_size_change = getattr(venue_api, "min_size_change", 0) or 0
-            # apply min_value using slippage-adjusted price for both venues
-            min_value = getattr(venue_api, "min_value", 0) or 0
-            if min_value and price:
-                size = max(size, min_value / price)
-            size = max(size, min_size, min_size_change)
-            size = _apply_step(size, min_size_change)
-            return size
+        # ensure the OB-based size meets min_value requirements on both venues; otherwise skip
+        def _notional_ok(size_val):
+            if reason in ("TT_LE", "WARM_UP_LE"):
+                n_l = (price_L_long_exec or 0) * size_val
+                n_e = (price_E_short_exec or 0) * size_val
+            else:
+                n_l = (price_L_short_exec or 0) * size_val
+                n_e = (price_E_long_exec or 0) * size_val
+            if min_value_L and n_l < min_value_L:
+                return False
+            if min_value_E and n_e < min_value_E:
+                return False
+            return True
 
-        snapped = []
-        for venue_api, side in leg_info:
-            ob_px, exec_px = _eff_price(venue_api, side)
-            if not exec_px:
-                continue
-            snapped.append(_snap_size(venue_api, shared, exec_px))
-        shared = max(snapped) if snapped else shared
+        if not _notional_ok(shared):
+            return 0.0
 
-        # enforce max_trade_value across both venues using exec prices
+        # apply max_trade_value cap (priority 2) using per-leg exec price (not worst)
+        cap_sizes = []
         if max_trade_value:
-            max_size_val = []
-            if price_L_long_exec and price_L_short_exec:
-                max_size_val.append(max_trade_value / max(price_L_long_exec, price_L_short_exec))
-            if price_E_long_exec and price_E_short_exec:
-                max_size_val.append(max_trade_value / max(price_E_long_exec, price_E_short_exec))
-            if max_size_val:
-                shared = min(shared, min(max_size_val))
+            def _leg_price(venue, side_long_exec, side_short_exec):
+                for v, s in leg_info:
+                    if v is venue:
+                        return side_long_exec if s == Side.LONG else side_short_exec
+                return None
+
+            price_L = _leg_price(self.L, price_L_long_exec, price_L_short_exec)
+            price_E = _leg_price(self.E, price_E_long_exec, price_E_short_exec)
+            if price_L:
+                cap_sizes.append(max_trade_value / price_L)
+            if price_E:
+                cap_sizes.append(max_trade_value / price_E)
+        if cap_sizes:
+            shared = min(shared, min(cap_sizes))
+
+        # snap using extended min_size_change only (ceil to nearest step)
+        def _apply_step(val, step):
+            if step and step > 0:
+                return math.ceil(val / step) * step
+            return val
+
+        shared = _apply_step(shared, min_size_change_E)
 
         return shared
 
