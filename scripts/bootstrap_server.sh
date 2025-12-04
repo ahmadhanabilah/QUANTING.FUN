@@ -9,19 +9,7 @@ set -euo pipefail
 # - Creates databases arb_bot and arb_bot_test if PostgreSQL is available.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# If not already running from repo root, clone and enter it
-if [ ! -d "$ROOT/.git" ]; then
-  cd /root
-  if [ ! -d "QUANTING.FUN" ]; then
-    echo "[bootstrap] Cloning repo..."
-    git clone https://github.com/ahmadhanabilah/QUANTING.FUN
-  fi
-  cd QUANTING.FUN/arb_bot 2>/dev/null || cd QUANTING.FUN
-  ROOT="$(pwd)"
-else
-  cd "$ROOT"
-fi
+cd "$ROOT"
 
 if command -v hostname >/dev/null 2>&1; then
   IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
