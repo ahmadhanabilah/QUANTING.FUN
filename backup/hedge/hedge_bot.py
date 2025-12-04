@@ -5,7 +5,7 @@ import os
 from typing import Optional
 import aiohttp
 
-from common.enums import Side, Venue
+from bot.common.enums import Side, Venue
 
 
 class HedgeBot:
@@ -106,9 +106,11 @@ class HedgeBot:
         """Send market with retry; returns qty sent on success, 0 on failure."""
         for attempt in range(1, max_retries + 1):
             try:
-                price = venue.ob["askPrice"] if side == Side.LONG else venue.ob["bidPrice"]
+                slip = getattr(venue, "config", {}).get("slippage", 0.0) if hasattr(venue, "config") else 0.0
+                raw_price = venue.ob["askPrice"] if side == Side.LONG else venue.ob["bidPrice"]
+                price = raw_price * (1 + slip) if side == Side.LONG else raw_price * (1 - slip)
                 start_ts = asyncio.get_event_loop().time()
-                res = await venue.send_market(side, qty)
+                res = await venue.send_market(side, qty, price)
                 elapsed_ms = (asyncio.get_event_loop().time() - start_ts) * 1000
                 if res:
                     sent_qty = float(res.get("filled_qty", qty))

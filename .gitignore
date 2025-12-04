@@ -1,7 +1,12 @@
 .venv/
 node_modules/
 logs/
+bot/logs/
 .env
+.env_bot
+.env_server
+.env_ui
+config.json
 __pycache__/
 *.pyc
 ui/build/

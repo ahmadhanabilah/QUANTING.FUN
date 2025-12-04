@@ -22,12 +22,14 @@ const descriptions: Record<string, string> = {
   MIN_SPREAD: "Minimum profitable spread before taking a trade",
   SPREAD_TP: "Target spread to capture before exiting",
   REPRICE_TICK: "Differences (Ticks) for process Top Orderbook",
-  ORDER_VALUE: "Order size per leg",
+  MAX_TRADE_VALUE: "Maximum notional per trade (per leg)",
+  MAX_OF_OB: "Max fraction of top-of-book depth to take (0-1)",
   MAX_POSITION_VALUE: "Maximum exposure allowed for this pair",
   MAX_TRADES: "Optional cap on concurrent trades, make it blank for Unlimited",
   MIN_HITS: "Minimum Consecutive Spread Condition Hits",
   TEST_MODE: "Run in paper mode without real orders",
-  DEDUP_OB: "if On, we dont process the same Top Orderbook Info",
+  DEDUP_OB: "If On, identical top-of-book snapshots won't be reprocessed",
+  WARM_UP_ORDERS: "Send a tiny hedged TT once books are live to warm connections",
 };
 
 const tips = [

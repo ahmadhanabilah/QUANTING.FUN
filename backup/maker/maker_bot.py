@@ -2,11 +2,11 @@
 import asyncio
 import time
 import logging
-from common.calc_spreads import calc_spreads
-from maker.logic_entry_exit import logic_entry_exit
-from common.enums import ActionType, Venue, Side
-from common.decision import Decision
-# from common.event_bus import publish  # not needed yet
+from bot.common.calc_spreads import calc_spreads
+from bot.backup.maker.logic_entry_exit import logic_entry_exit
+from bot.common.enums import ActionType, Venue, Side
+from bot.common.decision import Decision
+# from bot.common.event_bus import publish  # not needed yet
 
 
 logger_spread = logging.getLogger("Spread")
@@ -416,7 +416,14 @@ class MakerBot:
 
         venue_api = self.L if d.venue.name == "L" else self.E
 
-        price = venue_api.ob["askPrice"] if d.side.name == "LONG" else venue_api.ob["bidPrice"]
+        ob_price = venue_api.ob["askPrice"] if d.side.name == "LONG" else venue_api.ob["bidPrice"]
+        slip = getattr(venue_api, "config", {}).get("slippage") if hasattr(venue_api, "config") else None
+        price = ob_price
+        if slip is not None and ob_price:
+            if d.side.name == "LONG":
+                price = ob_price * (1 + slip)
+            else:
+                price = ob_price * (1 - slip)
         # TT legs share the smallest allowed size across both venues
         shared_tt = getattr(d, "_tt_size", None)
         if shared_tt is not None:
@@ -435,7 +442,7 @@ class MakerBot:
             raise RuntimeError(f"Order notional {size * price:.6f} below min value {min_value} for {d.venue.name}")
 
         start_ts = time.perf_counter()
-        result = await venue_api.send_market(d.side, size)
+        result = await venue_api.send_market(d.side, size, price)
         elapsed_ms = (time.perf_counter() - start_ts) * 1000
         if not result:
             return

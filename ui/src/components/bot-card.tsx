@@ -1,4 +1,4 @@
-import { Power, TrendingUp, TrendingDown, Activity, ChevronRight } from 'lucide-react';
+import { Power, TrendingUp, TrendingDown, Activity, ChevronRight, Pin, PinOff } from 'lucide-react';
 
 interface BotCardProps {
   bot: {
@@ -13,9 +13,11 @@ interface BotCardProps {
   };
   onToggle: () => void;
   onView?: () => void;
+  onPin?: () => void;
+  pinned?: boolean;
 }
 
-export function BotCard({ bot, onToggle, onView }: BotCardProps) {
+export function BotCard({ bot, onToggle, onView, onPin, pinned }: BotCardProps) {
   const isRunning = bot.status === 'running';
 
   return (
@@ -39,19 +41,37 @@ export function BotCard({ bot, onToggle, onView }: BotCardProps) {
             </div>
             <p className="text-slate-400 text-sm font-mono">{bot.E || bot.pair}</p>
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle();
-            }}
-            className={`p-2.5 rounded-xl transition-all ${
-              isRunning
-                ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 shadow-lg shadow-green-500/10'
-                : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 border border-slate-700/50'
-            }`}
-          >
-            <Power className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {onPin && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPin();
+                }}
+                className={`p-2.5 rounded-xl border transition-all ${
+                  pinned
+                    ? 'bg-yellow-500/15 text-yellow-300 border-yellow-500/40 shadow-lg shadow-yellow-500/10'
+                    : 'bg-slate-800/50 text-slate-400 hover:text-white hover:bg-slate-700/50 border-slate-700/50'
+                }`}
+                title={pinned ? 'Unpin bot' : 'Pin bot'}
+              >
+                {pinned ? <Pin className="w-4 h-4" /> : <PinOff className="w-4 h-4" />}
+              </button>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              className={`p-2.5 rounded-xl transition-all ${
+                isRunning
+                  ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 shadow-lg shadow-green-500/10'
+                  : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 border border-slate-700/50'
+              }`}
+            >
+              <Power className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">

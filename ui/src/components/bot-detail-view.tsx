@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Power, FileText, TrendingUp, Settings } from 'lucide-react';
-import { LogsViewer } from './logs-viewer';
+import { Power, TrendingUp, Settings, ListChecks } from 'lucide-react';
+import { DecisionsTable } from './decisions-table';
 import { TradesTable } from './trades-table';
 import { BotSettings } from './bot-settings';
 
-type DetailTab = 'logs' | 'trades' | 'settings';
+type DetailTab = 'decisions' | 'trades' | 'settings';
 
-const NUMBER_FIELDS = ['MIN_SPREAD', 'SPREAD_TP', 'REPRICE_TICK', 'ORDER_VALUE', 'MAX_POSITION_VALUE', 'MAX_TRADES', 'MIN_HITS'];
-const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB'];
+const NUMBER_FIELDS = ['MIN_SPREAD', 'SPREAD_TP', 'REPRICE_TICK', 'MAX_POSITION_VALUE', 'MAX_TRADE_VALUE', 'MAX_OF_OB', 'MAX_TRADES', 'MIN_HITS'];
+const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS'];
 
-export type DetailTab = 'logs' | 'trades' | 'settings';
+export type DetailTab = 'decisions' | 'trades' | 'settings';
 
 interface BotDetailViewProps {
   bot: {
@@ -22,14 +22,29 @@ interface BotDetailViewProps {
   };
   apiBase: string;
   authHeaders: Record<string, string>;
+  mode: 'live' | 'test';
   onToggle: () => void;
   onBack?: () => void;
   initialTab?: DetailTab;
   onTabChange?: (tab: DetailTab) => void;
   onClose?: () => void;
+  onModeChange?: (mode: 'live' | 'test') => void;
+  onSettingsSaved?: (draft: any) => void;
 }
 
-export function BotDetailView({ bot, apiBase, authHeaders, onToggle, onBack, initialTab = 'logs', onTabChange, onClose }: BotDetailViewProps) {
+export function BotDetailView({
+  bot,
+  apiBase,
+  authHeaders,
+  mode,
+  onToggle,
+  onBack,
+  initialTab = 'logs',
+  onTabChange,
+  onClose,
+  onModeChange,
+  onSettingsSaved,
+}: BotDetailViewProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>(initialTab);
   const [configSymbols, setConfigSymbols] = useState<any[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<any | null>(null);
@@ -147,7 +162,9 @@ export function BotDetailView({ bot, apiBase, authHeaders, onToggle, onBack, ini
       setSettingsDraft(normalizedDraft);
       localStorage.setItem("selectedPair", JSON.stringify({ L: normalizedDraft.SYMBOL_LIGHTER, E: normalizedDraft.SYMBOL_EXTENDED }));
       localStorage.setItem("selectedTab", "settings");
-      window.location.href = `${window.location.pathname}`;
+      if (onSettingsSaved) {
+        onSettingsSaved(normalizedDraft);
+      }
       return true;
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : 'Failed to save settings');
@@ -156,7 +173,7 @@ export function BotDetailView({ bot, apiBase, authHeaders, onToggle, onBack, ini
   };
 
   const tabs = [
-    { id: 'logs' as DetailTab, label: 'Logs', icon: FileText },
+    { id: 'decisions' as DetailTab, label: 'Decisions', icon: ListChecks },
     { id: 'trades' as DetailTab, label: 'Trades', icon: TrendingUp },
     { id: 'settings' as DetailTab, label: 'Bot Settings', icon: Settings },
   ];
@@ -188,7 +205,7 @@ export function BotDetailView({ bot, apiBase, authHeaders, onToggle, onBack, ini
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-6 flex-wrap justify-end">
             <div className="text-center px-6 py-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
               <p className="text-slate-400 text-xs mb-1">24h Profit</p>
               <p className={`text-2xl ${bot.profit24h >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -242,13 +259,13 @@ export function BotDetailView({ bot, apiBase, authHeaders, onToggle, onBack, ini
 
       {/* Tab content */}
       <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 border-t-0 rounded-b-xl p-6 shadow-xl">
-        {activeTab === 'logs' && (
-          <LogsViewer botId={bot.id} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} />
+        {activeTab === 'decisions' && (
+          <DecisionsTable botId={bot.id} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
         {activeTab === 'trades' && (
-          <TradesTable botId={bot.id} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} />
+          <TradesTable botId={bot.id} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
-          {activeTab === 'settings' && (
+        {activeTab === 'settings' && (
             <div className="space-y-3">
               {settingsError && (
                 <div className="px-4 py-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-sm">

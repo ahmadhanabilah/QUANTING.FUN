@@ -55,6 +55,6 @@
     },
     server: {
       port: 5000,
-      open: true,
+      open: false,
     },
   });

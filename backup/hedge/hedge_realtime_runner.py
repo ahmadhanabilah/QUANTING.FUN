@@ -4,15 +4,18 @@ import logging
 import os
 from pathlib import Path
 
-from common.state import State
-from common.enums import Venue
-from hedge.hedge_bot import HedgeBot
-from venues.helper_lighter import LighterWS
-from venues.helper_extended import ExtendedWS
+from bot.common.state import State
+from bot.common.enums import Venue
+from bot.backup.hedge.hedge_bot import HedgeBot
+from bot.venues.helper_lighter import LighterWS
+from bot.venues.helper_extended import ExtendedWS
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _load_env():
-    env_path = Path(__file__).resolve().parent.parent / ".env"
+    env_path = PROJECT_ROOT / ".env_bot"
     if not env_path.exists():
         return
     with env_path.open() as f:

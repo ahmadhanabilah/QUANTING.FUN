@@ -1,45 +1,66 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Download, Pause, Play, RefreshCcw } from 'lucide-react';
+import { Pause, Play, RefreshCcw } from 'lucide-react';
 
 interface TradesTableProps {
   botId: string;
   botName: string;
   apiBase: string;
   authHeaders: Record<string, string>;
+  mode?: 'live' | 'test';
+  onModeChange?: (mode: 'live' | 'test') => void;
 }
 
-type CsvRow = string[];
+type TradeRow = {
+  trace?: string | null;
+  ts?: string | null;
+  venue?: string | null;
+  size?: number | null;
+  ob_price?: number | null;
+  exec_price?: number | null;
+  lat_order?: number | null;
+  status?: string | null;
+  payload?: string | null;
+  resp?: string | null;
+};
+type FillRow = {
+  trace?: string | null;
+  ts?: string | null;
+  venue?: string | null;
+  base_amount?: number | null;
+  fill_price?: number | null;
+  latency?: number | null;
+};
 
-function parseCsvLine(line: string): CsvRow {
-  const cells: string[] = [];
-  let current = '';
-  let inQuotes = false;
+type SideInfo = {
+  venue?: string | null;
+  size?: number | null;
+  ob_price?: number | null;
+  exec_price?: number | null;
+  fill_price?: number | null;
+  lat_order?: number | null;
+  lat_fill?: number | null;
+  slippage?: number | null;
+  status?: string | null;
+  payload?: string | null;
+  resp?: string | null;
+};
 
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
-        continue;
-      }
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (char === ',' && !inQuotes) {
-      cells.push(current);
-      current = '';
-      continue;
-    }
-    current += char;
-  }
-  cells.push(current);
-  return cells;
-}
+type CombinedRow = {
+  trace?: string | null;
+  ts?: string | null;
+  reason?: string | null;
+  direction?: string | null;
+  spread?: number | null;
+  inv_before_str?: string | null;
+  inv_after_str?: string | null;
+  long?: SideInfo;
+  short?: SideInfo;
+};
 
-export function TradesTable({ botId, botName, apiBase, authHeaders }: TradesTableProps) {
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [rows, setRows] = useState<CsvRow[]>([]);
+export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live', onModeChange }: TradesTableProps) {
+  const [rows, setRows] = useState<TradeRow[]>([]);
+  const [fillRows, setFillRows] = useState<FillRow[]>([]);
+  const [combinedRows, setCombinedRows] = useState<CombinedRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
@@ -48,6 +69,7 @@ export function TradesTable({ botId, botName, apiBase, authHeaders }: TradesTabl
   const [symbolL, symbolE] = botId.split(':');
   const hasValidPair = Boolean(symbolL && symbolE);
 
+  // Rewritten fetch to include decisions cleanly
   const fetchTrades = useCallback(
     async (showSpinner = false) => {
       if (!hasValidPair) {
@@ -58,30 +80,43 @@ export function TradesTable({ botId, botName, apiBase, authHeaders }: TradesTabl
       if (showSpinner) setLoading(true);
 
       try {
-        const res = await fetch(`${apiBase}/api/trades/${symbolL}/${symbolE}`, { headers: authHeaders });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(typeof data?.detail === 'string' ? data.detail : 'Failed to load trades');
+        const [tradeRes, fillRes, decRes] = await Promise.all([
+          fetch(`${apiBase}/api/tt/trades?symbolL=${symbolL}&symbolE=${symbolE}&mode=${mode}`, { headers: authHeaders }),
+          fetch(`${apiBase}/api/tt/fills?symbolL=${symbolL}&symbolE=${symbolE}&mode=${mode}`, { headers: authHeaders }),
+          fetch(`${apiBase}/api/tt/decisions?symbolL=${symbolL}&symbolE=${symbolE}&mode=${mode}`, { headers: authHeaders }),
+        ]);
+        const tradeData = await tradeRes.json();
+        const fillData = await fillRes.json();
+        const decData = await decRes.json();
+        if (!tradeRes.ok) {
+          throw new Error(typeof tradeData?.detail === 'string' ? tradeData.detail : 'Failed to load trades');
+        }
+        if (!fillRes.ok) {
+          throw new Error(typeof fillData?.detail === 'string' ? fillData.detail : 'Failed to load fills');
+        }
+        if (!decRes.ok) {
+          throw new Error(typeof decData?.detail === 'string' ? decData.detail : 'Failed to load decisions');
         }
 
-        const headerCells = data.header ? parseCsvLine(data.header) : [];
-        const bodyRows: CsvRow[] = Array.isArray(data.rows)
-          ? data.rows.map((r: any) => parseCsvLine(String(r?.raw ?? '')))
-          : [];
+        const bodyTrades: TradeRow[] = Array.isArray(tradeData.rows) ? tradeData.rows : [];
+        const bodyFills: FillRow[] = Array.isArray(fillData.rows) ? fillData.rows : [];
+        const bodyDecisions: any[] = Array.isArray(decData.rows) ? decData.rows : [];
 
-        setHeaders(headerCells);
-        setRows(bodyRows);
+        setRows(bodyTrades);
+        setFillRows(bodyFills);
+        setCombinedRows(buildCombined(bodyTrades, bodyFills, bodyDecisions));
         setError('');
         setLastUpdated(new Date().toLocaleTimeString());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load trades');
-        setHeaders([]);
         setRows([]);
+        setFillRows([]);
+        setCombinedRows([]);
       } finally {
         if (showSpinner) setLoading(false);
       }
     },
-    [apiBase, authHeaders, hasValidPair, symbolE, symbolL]
+    [apiBase, authHeaders, hasValidPair, mode, symbolE, symbolL]
   );
 
   useEffect(() => {
@@ -96,113 +131,370 @@ export function TradesTable({ botId, botName, apiBase, authHeaders }: TradesTabl
     return () => clearInterval(id);
   }, [fetchTrades, isPaused]);
 
-  const handleExport = async () => {
-    if (!hasValidPair) return;
-    try {
-      const res = await fetch(`${apiBase}/api/trades/${symbolL}/${symbolE}/csv`, { headers: authHeaders });
-      const text = await res.text();
-      if (!res.ok) {
-        throw new Error(text || 'Unable to export CSV');
+  const fmt = (val: any, digits = 4) => {
+    if (val === null || val === undefined || val === '') return '—';
+    if (typeof val === 'number') return Number.isFinite(val) ? val.toFixed(digits) : String(val);
+    return String(val);
+  };
+  const tradeCount = combinedRows.length;
+
+  function buildCombined(trades: TradeRow[], fills: FillRow[], decisions: any[]): CombinedRow[] {
+    const decMap: Record<string, { reason?: string | null; direction?: string | null; spread?: number | null; inv_before_str?: string | null; inv_after_str?: string | null }> = {};
+    decisions.forEach((d) => {
+      const trace = d.trace_id;
+      if (!trace) return;
+      decMap[trace] = {
+        reason: d.reason,
+        direction: d.direction,
+        spread: d.spread_signal,
+        inv_before_str: d.inv_before_str,
+        inv_after_str: d.inv_after_str,
+      };
+    });
+
+    const byTrace: Record<string, { ts?: string | null; reason?: string | null; direction?: string | null; spread?: number | null; inv_before_str?: string | null; inv_after_str?: string | null; legs: Record<string, SideInfo> }> = {};
+    trades.forEach((t) => {
+      if (!t.trace) return;
+      const decInfo = decMap[t.trace] || {};
+      if (!byTrace[t.trace]) {
+        byTrace[t.trace] = {
+          ts: t.ts,
+          reason: decInfo.reason,
+          direction: decInfo.direction,
+          spread: decInfo.spread,
+          inv_before_str: decInfo.inv_before_str,
+          inv_after_str: decInfo.inv_after_str,
+          legs: {},
+        };
+      } else {
+        byTrace[t.trace].reason = byTrace[t.trace].reason || decInfo.reason;
+        byTrace[t.trace].direction = byTrace[t.trace].direction || decInfo.direction;
+        byTrace[t.trace].spread = byTrace[t.trace].spread ?? decInfo.spread;
+        byTrace[t.trace].inv_before_str = byTrace[t.trace].inv_before_str || decInfo.inv_before_str;
+        byTrace[t.trace].inv_after_str = byTrace[t.trace].inv_after_str || decInfo.inv_after_str;
       }
-      const blob = new Blob([text], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${botName}-trades.csv`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to export CSV');
-    }
+      const side: SideInfo = {
+        venue: t.venue,
+        size: t.size,
+        ob_price: t.ob_price,
+        exec_price: t.exec_price,
+        lat_order: t.lat_order,
+        status: t.status,
+        payload: t.payload,
+        resp: t.resp,
+      };
+      if (t.venue) byTrace[t.trace].legs[t.venue] = side;
+    });
+    fills.forEach((f) => {
+      if (!f.trace || !f.venue) return;
+      if (!byTrace[f.trace]) byTrace[f.trace] = { ts: f.ts, legs: {} };
+      const leg = byTrace[f.trace].legs[f.venue] || {};
+      leg.fill_price = f.fill_price;
+      leg.lat_fill = f.latency;
+      leg.size = leg.size ?? f.base_amount;
+      byTrace[f.trace].legs[f.venue] = leg;
+    });
+
+    const entries = Object.entries(byTrace);
+    const singles = entries.filter(([, d]) => Object.keys(d.legs).length === 1);
+    const usedSingles = new Set<string>();
+    const mergedEntries: Array<[string, { ts?: string | null; reason?: string | null; direction?: string | null; spread?: number | null; inv_before_str?: string | null; inv_after_str?: string | null; legs: Record<string, SideInfo> }]> = [];
+
+    const ms = (ts?: string | null) => (ts ? new Date(ts).getTime() : 0);
+    const oppSign = (a?: SideInfo, b?: SideInfo) => {
+      const sa = a?.size ?? 0;
+      const sb = b?.size ?? 0;
+      return sa !== 0 && sb !== 0 && Math.sign(sa) !== Math.sign(sb);
+    };
+
+    // Attempt to pair single-leg traces that share close timestamps and opposite signs
+    singles.forEach(([traceA, dataA], idxA) => {
+      if (usedSingles.has(traceA)) return;
+      const legA = Object.values(dataA.legs)[0];
+      singles.slice(idxA + 1).some(([traceB, dataB]) => {
+        if (usedSingles.has(traceB)) return false;
+        const legB = Object.values(dataB.legs)[0];
+        if (!oppSign(legA, legB)) return false;
+        const dt = Math.abs(ms(dataA.ts) - ms(dataB.ts));
+        if (dt > 2000) return false;
+        usedSingles.add(traceA);
+        usedSingles.add(traceB);
+        mergedEntries.push([
+          `${traceA}+${traceB}`,
+          {
+            ts: ms(dataA.ts) <= ms(dataB.ts) ? dataA.ts : dataB.ts,
+            reason: dataA.reason || dataB.reason,
+            direction: dataA.direction || dataB.direction,
+            spread: dataA.spread ?? dataB.spread,
+            legs: { ...dataA.legs, ...dataB.legs },
+          },
+        ]);
+        return true;
+      });
+    });
+
+    const out: CombinedRow[] = [];
+    const allEntries = [
+      ...entries.filter(([t, d]) => Object.keys(d.legs).length > 1 || !usedSingles.has(t)),
+      ...mergedEntries,
+    ];
+
+    allEntries.forEach(([trace, data]) => {
+      const legs = Object.values(data.legs);
+      let long: SideInfo | undefined;
+      let short: SideInfo | undefined;
+      legs.forEach((leg) => {
+        const size = leg.size ?? 0;
+        if (size > 0 && !long) long = leg;
+        if (size < 0 && !short) short = leg;
+      });
+      // fallback assignment if signs missing
+      if (!long && legs.length > 0) long = legs[0];
+      if (!short && legs.length > 1) short = legs[1];
+
+      const calcSlip = (leg?: SideInfo, isLong?: boolean) => {
+        if (!leg || leg.fill_price == null || leg.ob_price == null) return null;
+        if (!leg.ob_price) return null;
+        return isLong
+          ? ((leg.fill_price - leg.ob_price) / leg.ob_price) * 100
+          : ((leg.ob_price - leg.fill_price) / leg.ob_price) * 100;
+      };
+      const traceRow: CombinedRow = {
+        trace,
+        ts: data.ts,
+        reason: data.reason,
+        direction: data.direction,
+        spread: data.spread,
+        inv_before_str: data.inv_before_str,
+        inv_after_str: data.inv_after_str,
+        long: long
+          ? {
+              ...long,
+              slippage: calcSlip(long, true),
+            }
+          : undefined,
+        short: short
+          ? {
+              ...short,
+              slippage: calcSlip(short, false),
+            }
+          : undefined,
+      };
+      out.push(traceRow);
+    });
+    return out.sort((a, b) => {
+      const ta = a.ts ? new Date(a.ts).getTime() : 0;
+      const tb = b.ts ? new Date(b.ts).getTime() : 0;
+      return tb - ta;
+    });
+  }
+
+  const renderSide = (_label: string, side?: SideInfo) => {
+    if (!side) return <div className="text-slate-500 text-xs">—</div>;
+    return (
+      <div className="space-y-1">
+        <div className="text-slate-400 text-[11px]">
+          <span className="text-slate-500">Venue:</span> {side.venue || '—'}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Size:</span> {fmt(side.size, 4)}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">OB:</span> {fmt(side.ob_price, 6)}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Exec:</span> {fmt(side.exec_price, 6)}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Fill:</span> {fmt(side.fill_price, 6)}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Order Lat:</span> {fmt(side.lat_order, 2)} ms
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Fill Lat:</span> {fmt(side.lat_fill, 2)} ms
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Slippage:</span> {side.slippage == null ? '—' : `${fmt(side.slippage, 2)}%`}
+        </div>
+        <div className="text-slate-400 text-[11px] font-mono">
+          <span className="text-slate-500">Status:</span> {side.status || '—'}
+        </div>
+
+        <div className="text-slate-500 text-[10px] font-mono break-all">
+            <span className="text-slate-500">Payload:</span> {side.payload || '—'}
+        </div>
+        <div className="text-slate-500 text-[10px] font-mono break-all">
+            <span className="text-slate-500">Resp:</span> {side.resp || '—'}
+        </div>
+
+      </div>
+    );
   };
 
-  const formatHeader = (key: string, idx: number) => {
-    const normalized = key.toLowerCase();
-    if (normalized === 'venue_l') return 'Venue Long';
-    if (normalized === 'venue_e') return 'Venue Short';
-    return key || `Col ${idx + 1}`;
+  const renderInv = (label: string, inv?: string | null) => {
+    if (!inv) return null;
+
+    const fmtDelta = (l?: { qty?: number | null; price?: number | null }, e?: { qty?: number | null; price?: number | null }) => {
+      if (!l || !e || l.price == null || e.price == null) return null;
+      const lq = l.qty ?? 0;
+      const eq = e.qty ?? 0;
+      if (lq > 0 && eq < 0 && l.price) return ((e.price - l.price) / l.price) * 100;
+      if (lq < 0 && eq > 0 && e.price) return ((l.price - e.price) / e.price) * 100;
+      return null;
+    };
+
+    const lines: string[] = [];
+    let deltaLine: string | null = null;
+
+    // try JSON shape
+    try {
+      const parsed = JSON.parse(inv);
+      const arr = Array.isArray(parsed) ? parsed : [];
+      const e = arr.find((x) => x && x.venue === 'E');
+      const l = arr.find((x) => x && x.venue === 'L');
+      if (e) lines.push(`E -> Qty: ${fmt(e.qty, 6)}, Price: ${fmt(e.price, 6)}`);
+      if (l) lines.push(`L -> Qty: ${fmt(l.qty, 6)}, Price: ${fmt(l.price, 6)}`);
+      const d = fmtDelta(l, e);
+      if (d != null) deltaLine = `Δ -> ${fmt(d, 2)}%`;
+    } catch {
+      // fallback to legacy string parsing
+      const norm = inv.replace("Δ:", "Δ ->").replace("Δ :", "Δ ->");
+      const parts = norm.split("|").map((p) => p.trim()).filter(Boolean);
+      lines.push(...parts);
+      const deltaPart = parts.find((p) => p.includes("Δ"));
+      if (deltaPart) deltaLine = deltaPart;
+    }
+
+    if (deltaLine) lines.push(deltaLine);
+
+    return (
+      <div className="space-y-1">
+        <div className="text-slate-300 text-xs font-semibold">{label}</div>
+        {lines.map((p, idx) => (
+          <div key={idx} className="text-slate-400 text-[11px] font-mono">{p}</div>
+        ))}
+      </div>
+    );
   };
 
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-        <div>
-          <p className="text-slate-400 text-sm">Trades from trades.csv ({symbolL}/{symbolE})</p>
-          <p className="text-xs text-slate-500">
-            {loading
-              ? 'Loading...'
-              : error
-              ? `Error: ${error}`
-              : lastUpdated
-              ? `Updated at ${lastUpdated}`
-              : 'Waiting for data'}
-          </p>
+        <div className="space-y-1">
+          <p className="text-slate-200 text-sm font-semibold">Trades · {symbolL}/{symbolE}</p>
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span className="px-2 py-1 rounded-md bg-slate-800/70 border border-slate-700/70">
+              {loading
+                ? 'Loading...'
+                : error
+                ? 'Error'
+                : lastUpdated
+                ? `Updated ${lastUpdated}`
+                : 'Waiting for data'}
+            </span>
+            <span className="px-2 py-1 rounded-md bg-slate-800/50 border border-slate-700/70">Rows: {tradeCount}</span>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setIsPaused((p) => !p)}
-            className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
-          >
-            {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-            {isPaused ? 'Resume Auto-Refresh' : 'Pause Auto-Refresh'}
-          </button>
-          <button
-            onClick={() => fetchTrades(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
-            disabled={loading}
-          >
-            <RefreshCcw className="w-4 h-4" />
-            {loading ? 'Refreshing...' : 'Refresh'}
-          </button>
-          <button
-            onClick={handleExport}
-            className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50 disabled:opacity-50"
-            disabled={!rows.length}
-          >
-            <Download className="w-4 h-4" />
-            Export CSV
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsPaused((p) => !p)}
+              className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
+            >
+              {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              onClick={() => fetchTrades(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
+              disabled={loading}
+            >
+              <RefreshCcw className="w-4 h-4" />
+              {loading ? 'Refreshing...' : 'Refresh'}
+            </button>
+            <div className="flex bg-slate-900/70 rounded-lg overflow-hidden border border-slate-700/70">
+              {(['live', 'test'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => onModeChange && onModeChange(m)}
+                  className={`px-3 py-2 text-xs uppercase tracking-wide transition-all ${
+                    mode === m
+                      ? 'bg-blue-600 text-white shadow-inner shadow-blue-500/30'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
       <div className="bg-slate-950/80 backdrop-blur-sm border border-slate-800/50 rounded-xl overflow-hidden shadow-inner">
         <div className="overflow-x-auto">
-          {error ? (
-            <div className="px-4 py-10 text-center text-red-400 text-sm">{error}</div>
-          ) : !rows.length && !loading ? (
-            <div className="px-4 py-10 text-center text-slate-500 text-sm">No trades recorded yet</div>
-          ) : (
-            <table className="w-full">
-              <thead className="bg-slate-900/80 border-b border-slate-800/50">
+          <table className="w-full table-mono">
+            <thead className="bg-slate-900/80 border-b border-slate-800/50">
+              <tr>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Time</th>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Trace</th>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Reason</th>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Inv Before / After</th>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Long Side</th>
+                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Short Side</th>
+              </tr>
+            </thead>
+            <tbody>
+              {error ? (
                 <tr>
-                  {headers.map((cell, idx) => (
-                    <th key={idx} className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">
-                      {formatHeader(cell, idx)}
-                    </th>
-                  ))}
+                  <td colSpan={5} className="px-4 py-10 text-center text-red-400 text-sm">
+                    {error}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIdx) => (
+              ) : !combinedRows.length && !loading ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-10 text-center text-slate-500 text-sm">
+                    No trades recorded yet
+                  </td>
+                </tr>
+              ) : (
+                combinedRows.map((row, rowIdx) => (
                   <tr key={rowIdx} className="border-b border-slate-800/30 hover:bg-slate-800/20 transition-all">
-                    {row.map((cell, cellIdx) => (
-                      <td key={cellIdx} className="px-4 py-3 text-slate-200 text-xs font-mono whitespace-nowrap">
-                        {cell || '—'}
-                      </td>
-                    ))}
+                    <td className="px-4 py-3 text-slate-200 text-xs font-mono whitespace-nowrap">
+                      {row.ts ? new Date(row.ts).toLocaleTimeString() : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-slate-400 text-[11px] font-mono whitespace-nowrap">
+                      {row.trace ? row.trace.slice(0, 8) : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-slate-200 text-xs whitespace-nowrap">
+                      <div className="text-[11px] text-slate-200 font-mono space-y-1">
+                        <div className="text-slate-300">{row.direction ? row.direction.toUpperCase() : '—'}</div>
+                        <div className="text-slate-400">{row.reason || '—'}</div>
+                        <div className="text-slate-500">Δ : {row.spread == null ? '—' : `${fmt(row.spread, 2)}%`}</div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 align-top">
+                      <div className="space-y-2">
+                        {renderInv("Before", row.inv_before_str)}
+                        {renderInv("After", row.inv_after_str)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 align-top">{renderSide('Long', row.long)}</td>
+                    <td className="px-4 py-3 align-top">{renderSide('Short', row.short)}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
       <div className="mt-4 flex items-center justify-between text-sm bg-slate-800/30 rounded-lg px-4 py-3 border border-slate-700/50">
         <span className="text-slate-400">
-          Showing <span className="text-white font-medium">{rows.length}</span> trades
+          Showing <span className="text-white font-medium">{combinedRows.length}</span> trades
         </span>
-        <span className="text-slate-500 text-xs">Source: logs/{symbolL}:{symbolE}/trades.csv</span>
+        <span className="text-slate-500 text-xs">Source: DB ({mode})</span>
       </div>
     </div>
   );

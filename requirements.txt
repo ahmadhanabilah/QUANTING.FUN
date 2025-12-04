@@ -47,3 +47,5 @@ fast-stark-crypto==0.3.8
 bitarray==3.8.0
 ckzg==2.1.5
 aiohappyeyeballs==2.6.1
+asyncpg==0.30.0
+prettytable==3.9.0

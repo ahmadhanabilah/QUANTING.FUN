@@ -1,5 +1,5 @@
-from common.enums import ActionType, Venue, Side
-from common.decision import Decision
+from bot.common.enums import ActionType, Venue, Side
+from bot.common.decision import Decision
 
 
 def logic_entry_exit(state, spreads, minSpread, spreadTP, spreadInv,
