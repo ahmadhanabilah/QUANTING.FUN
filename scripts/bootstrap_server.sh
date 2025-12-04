@@ -5,7 +5,7 @@ set -euo pipefail
 # - Installs system deps (Python, Node, Tailwind toolchain, PostgreSQL, tmux).
 # - Creates venv + pip deps.
 # - Installs UI deps (including Tailwind).
-# - Writes .env_server, .env_bot, .env_ui, config.json (single NEW/NEW-USD pair).
+# - Writes .env_server, .env_bot, config.json (single NEW/NEW-USD pair).
 # - Creates databases arb_bot and arb_bot_test if PostgreSQL is available.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,10 +58,6 @@ cat > .env_bot <<EOF
 DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
 AUTH_USER=admin
 AUTH_PASS=admin
-EOF
-
-cat > .env_ui <<EOF
-VITE_API_BASE=${API_HOST}
 EOF
 
 echo "[bootstrap] Writing config.json (single NEW/NEW-USD pair)..."
