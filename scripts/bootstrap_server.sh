@@ -45,16 +45,41 @@ cd "$ROOT"
 
 echo "[bootstrap] Writing .env files..."
 cat > .env_server <<EOF
-DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
-TEST_DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot_test
+# Auth
 AUTH_USER=admin
 AUTH_PASS=admin
+
+# Postgres
+DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
+TEST_DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot_test
+
+# UI / CORS
 CORS_ORIGINS=${CORS_ORIGINS}
 CORS_ORIGIN_REGEX=
-DB_WATCHDOG_ENABLED=false
 EOF
 
 cat > .env_bot <<EOF
+# Lighter venue
+LIGHTER_API_PRIVATE_KEY=
+LIGHTER_ACCOUNT_INDEX=
+LIGHTER_API_KEY_INDEX=
+
+# Extended venue
+EXTENDED_VAULT_ID=
+EXTENDED_PRIVATE_KEY=
+EXTENDED_PUBLIC_KEY=
+EXTENDED_API_KEY=
+
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_TOPIC_ID=
+
+# Watchdog
+DB_WATCHDOG_ENABLED=true
+DB_WATCHDOG_PERIOD=60
+
+# DB/Auth (for bot)
 DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
 AUTH_USER=admin
 AUTH_PASS=admin
