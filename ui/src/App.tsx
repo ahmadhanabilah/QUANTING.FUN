@@ -6,6 +6,15 @@ import { BotDetailView } from "./components/bot-detail-view";
 import { SettingsPanel } from "./components/settings-panel";
 import type { DetailTab } from "./components/bot-detail-view";
 import { LoginPage } from "./components/login-page";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "./components/ui/dialog";
 
 type SymbolCfg = Record<string, any> & {
   SYMBOL_LIGHTER: string;
@@ -30,7 +39,153 @@ type BotCardModel = {
   E: string;
 };
 
-const API_BASE = "http://46.250.248.201:5001";
+type ServerHealth = {
+  cpu: { percent: number; per_core?: number[]; count: number };
+  memory: { total: number; used: number; percent: number; available: number };
+  swap: { total: number; used: number; percent: number };
+  disk: { total: number; used: number; percent: number; path: string };
+  load: number[];
+  uptime: number;
+  boot_time: number;
+  process_count: number;
+  net: { bytes_sent: number; bytes_recv: number };
+  timestamp: number;
+};
+
+type CreateBotDraft = {
+  SYMBOL_LIGHTER: string;
+  SYMBOL_EXTENDED: string;
+  MIN_SPREAD: number;
+  SPREAD_TP: number;
+  REPRICE_TICK: number;
+  MAX_POSITION_VALUE: number | null;
+  MAX_TRADE_VALUE: number;
+  MAX_OF_OB: number;
+  MAX_TRADES: number | null;
+  MIN_HITS: number;
+  TEST_MODE: boolean;
+  DEDUP_OB: boolean;
+  WARM_UP_ORDERS: boolean;
+};
+
+type BulkInputItem = {
+  label: string;
+  entry: Partial<CreateBotDraft>;
+};
+
+type BulkEntryPreview = {
+  label: string;
+  pairLabel: string;
+  status: "ready" | "duplicate" | "existing" | "invalid";
+  detail?: string;
+};
+
+type BulkPreviewResult = {
+  readyEntries: SymbolCfg[];
+  entryPreviews: BulkEntryPreview[];
+  parseWarnings: string[];
+  counts: {
+    total: number;
+    ready: number;
+    duplicates: number;
+    existing: number;
+    invalid: number;
+  };
+};
+
+const BULK_STATUS_STYLES: Record<BulkEntryPreview["status"], { label: string; className: string }> = {
+  ready: {
+    label: "Ready",
+    className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+  },
+  existing: {
+    label: "Existing",
+    className: "border-slate-500/40 bg-slate-500/15 text-slate-200",
+  },
+  duplicate: {
+    label: "Duplicate",
+    className: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+  },
+  invalid: {
+    label: "Invalid",
+    className: "border-red-500/40 bg-red-500/15 text-red-300",
+  },
+};
+
+const BASE_BOT_DRAFT: CreateBotDraft = {
+  SYMBOL_LIGHTER: "NEW",
+  SYMBOL_EXTENDED: "NEW-USD",
+  MIN_SPREAD: 0.3,
+  SPREAD_TP: 0.2,
+  REPRICE_TICK: 0,
+  MAX_POSITION_VALUE: 500,
+  MAX_TRADE_VALUE: 25,
+  MAX_OF_OB: 0.3,
+  MAX_TRADES: null,
+  MIN_HITS: 1,
+  TEST_MODE: false,
+  DEDUP_OB: true,
+  WARM_UP_ORDERS: false,
+};
+
+const makeBotDraft = (overrides: Partial<CreateBotDraft> = {}): CreateBotDraft => ({
+  ...BASE_BOT_DRAFT,
+  ...overrides,
+});
+
+function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>): SymbolCfg | null {
+  const merged: CreateBotDraft = {
+    ...makeBotDraft(),
+    ...(entry as Partial<CreateBotDraft>),
+  };
+  const clean = (val: any) => (typeof val === "string" ? val.trim() : val);
+  const symL = clean(entry?.SYMBOL_LIGHTER ?? merged.SYMBOL_LIGHTER);
+  const symE = clean(entry?.SYMBOL_EXTENDED ?? merged.SYMBOL_EXTENDED);
+  if (!symL || !symE) {
+    return null;
+  }
+  const toNumber = (raw: any, fallback: number) => {
+    if (raw === "" || raw === undefined || raw === null) return fallback;
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const toNullable = (raw: any, fallback: number | null) => {
+    if (raw === "" || raw === undefined) return fallback;
+    if (raw === null) return null;
+    const num = Number(raw);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return num;
+  };
+  const toNullOrNumber = (raw: any, fallback: number | null) => {
+    if (raw === "" || raw === undefined || raw === null) return null;
+    const num = Number(raw);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return num;
+  };
+  return {
+    SYMBOL_LIGHTER: String(symL).trim(),
+    SYMBOL_EXTENDED: String(symE).trim(),
+    MIN_SPREAD: toNumber(entry?.MIN_SPREAD ?? merged.MIN_SPREAD, merged.MIN_SPREAD),
+    SPREAD_TP: toNumber(entry?.SPREAD_TP ?? merged.SPREAD_TP, merged.SPREAD_TP),
+    REPRICE_TICK: toNumber(entry?.REPRICE_TICK ?? merged.REPRICE_TICK, merged.REPRICE_TICK),
+    MAX_POSITION_VALUE: toNullOrNumber(entry?.MAX_POSITION_VALUE ?? merged.MAX_POSITION_VALUE, merged.MAX_POSITION_VALUE),
+    MAX_TRADE_VALUE: toNumber(entry?.MAX_TRADE_VALUE ?? merged.MAX_TRADE_VALUE, merged.MAX_TRADE_VALUE),
+    MAX_OF_OB: toNumber(entry?.MAX_OF_OB ?? merged.MAX_OF_OB, merged.MAX_OF_OB),
+    MAX_TRADES: toNullOrNumber(entry?.MAX_TRADES ?? merged.MAX_TRADES, merged.MAX_TRADES),
+    MIN_HITS: Math.max(1, toNumber(entry?.MIN_HITS ?? merged.MIN_HITS, merged.MIN_HITS)),
+    TEST_MODE: Boolean(entry?.TEST_MODE ?? merged.TEST_MODE),
+    DEDUP_OB: Boolean(entry?.DEDUP_OB ?? merged.DEDUP_OB),
+    WARM_UP_ORDERS: Boolean(entry?.WARM_UP_ORDERS ?? merged.WARM_UP_ORDERS),
+  };
+}
+
+const API_BASE =
+  (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ||
+  `${window.location.protocol}//${window.location.hostname}:5001`;
 function buildAuth(user: string, pass: string) {
   const token = btoa(unescape(encodeURIComponent(`${user}:${pass}`)));
   return { Authorization: `Basic ${token}` };
@@ -55,6 +210,146 @@ function formatEnv(lines: EnvLine[]) {
     .join("\n");
 }
 
+function formatBytesShort(bytes: number) {
+  if (!Number.isFinite(bytes)) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  const precision = value >= 100 || idx === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[idx]}`;
+}
+
+function formatDurationShort(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return `${Math.floor(seconds)}s`;
+}
+
+function parseBulkInput(raw: string): { items: BulkInputItem[]; errors: string[] } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { items: [], errors: [] };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return {
+        items: parsed.map((entry, idx) => ({
+          entry: entry as Partial<CreateBotDraft>,
+          label: `Item ${idx + 1}`,
+        })),
+        errors: [],
+      };
+    }
+    return { items: [], errors: ["JSON input must be an array of configs"] };
+  } catch {
+    const items: BulkInputItem[] = [];
+    const errors: string[] = [];
+    const lines = trimmed.split(/\r?\n/);
+    lines.forEach((line, idx) => {
+      const clean = line.trim();
+      if (!clean) return;
+      const parts = clean.split(/[,\s]+/).filter(Boolean);
+      if (parts.length < 2) {
+        errors.push(`Line ${idx + 1}: expected SYMBOL_LIGHTER and SYMBOL_EXTENDED`);
+        return;
+      }
+      const entry: Partial<CreateBotDraft> = {
+        SYMBOL_LIGHTER: parts[0],
+        SYMBOL_EXTENDED: parts[1],
+      };
+      if (parts[2]) entry.MIN_SPREAD = Number(parts[2]);
+      if (parts[3]) entry.SPREAD_TP = Number(parts[3]);
+      if (parts[4]) entry.MIN_HITS = Number(parts[4]);
+      items.push({ entry, label: `Line ${idx + 1}` });
+    });
+    return { items, errors };
+  }
+}
+
+function buildBulkPreview(raw: string, existing: SymbolCfg[]): BulkPreviewResult {
+  const { items, errors } = parseBulkInput(raw);
+  const existingKeys = new Set(existing.map((s) => `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`));
+  const seen = new Set<string>();
+  const readyEntries: SymbolCfg[] = [];
+  const entryPreviews: BulkEntryPreview[] = [];
+  let ready = 0;
+  let duplicates = 0;
+  let existingCount = 0;
+  let invalid = 0;
+  items.forEach((item) => {
+    const normalized = normalizeBotEntry(item.entry);
+    if (!normalized) {
+      invalid += 1;
+      entryPreviews.push({
+        label: item.label,
+        pairLabel: "—",
+        status: "invalid",
+        detail: "Missing pair information",
+      });
+      return;
+    }
+    const key = `${normalized.SYMBOL_LIGHTER}:${normalized.SYMBOL_EXTENDED}`;
+    const pairLabel = `${normalized.SYMBOL_LIGHTER}/${normalized.SYMBOL_EXTENDED}`;
+    if (seen.has(key)) {
+      duplicates += 1;
+      entryPreviews.push({
+        label: item.label,
+        pairLabel,
+        status: "duplicate",
+        detail: "Duplicate within this input",
+      });
+      return;
+    }
+    seen.add(key);
+    if (existingKeys.has(key)) {
+      existingCount += 1;
+      entryPreviews.push({
+        label: item.label,
+        pairLabel,
+        status: "existing",
+        detail: "Already present in dashboard",
+      });
+      return;
+    }
+    readyEntries.push(normalized);
+    ready += 1;
+    entryPreviews.push({
+      label: item.label,
+      pairLabel,
+      status: "ready",
+      detail: "Ready to create",
+    });
+  });
+  return {
+    readyEntries,
+    entryPreviews,
+    parseWarnings: errors,
+    counts: {
+      total: items.length,
+      ready,
+      duplicates,
+      existing: existingCount,
+      invalid,
+    },
+  };
+}
+
 export default function App() {
   const [user, setUser] = useState(localStorage.getItem("u") || "");
   const [pass, setPass] = useState(localStorage.getItem("p") || "");
@@ -67,23 +362,14 @@ export default function App() {
   const [envLines, setEnvLines] = useState<EnvLine[]>([]);
   const [msg, setMsg] = useState("");
   const [autoAuthAttempted, setAutoAuthAttempted] = useState(false);
-  const [createDraft, setCreateDraft] = useState({
-    SYMBOL_LIGHTER: "NEW",
-    SYMBOL_EXTENDED: "NEW-USD",
-    MIN_SPREAD: 0.3,
-    SPREAD_TP: 0.2,
-    REPRICE_TICK: 0,
-    MAX_POSITION_VALUE: 500,
-    MAX_TRADE_VALUE: 25,
-    MAX_OF_OB: 0.3,
-    MAX_TRADES: null as number | null,
-    MIN_HITS: 3,
-    TEST_MODE: false,
-    DEDUP_OB: true,
-    WARM_UP_ORDERS: false,
-  });
+  const [createDraft, setCreateDraft] = useState<CreateBotDraft>(() => makeBotDraft());
   const [createError, setCreateError] = useState("");
   const [createSaving, setCreateSaving] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkInput, setBulkInput] = useState("");
+  const [bulkError, setBulkError] = useState("");
+  const [bulkSummary, setBulkSummary] = useState("");
+  const [bulkSaving, setBulkSaving] = useState(false);
   const [initialDetailTab, setInitialDetailTab] = useState<DetailTab | undefined>(undefined);
   const [selectionRestored, setSelectionRestored] = useState(false);
   const [dataMode, setDataMode] = useState<"live" | "test">(() =>
@@ -97,8 +383,34 @@ export default function App() {
     }
   });
   const [searchTerm, setSearchTerm] = useState("");
+  const [serverStatus, setServerStatus] = useState<ServerHealth | null>(null);
+  const [serverStatusError, setServerStatusError] = useState("");
 
   const authHeaders = useMemo(() => buildAuth(user, pass), [user, pass]);
+  const bulkPreview = useMemo(() => buildBulkPreview(bulkInput, symbols), [bulkInput, symbols]);
+  const bulkStatChips = [
+    { label: "Ready", value: bulkPreview.counts.ready, className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" },
+    { label: "Existing", value: bulkPreview.counts.existing, className: "border-slate-500/40 bg-slate-500/10 text-slate-200" },
+    { label: "Duplicates", value: bulkPreview.counts.duplicates, className: "border-amber-500/40 bg-amber-500/10 text-amber-300" },
+    { label: "Invalid", value: bulkPreview.counts.invalid, className: "border-red-500/40 bg-red-500/10 text-red-300" },
+  ];
+  const serverStatusSummary = useMemo(() => {
+    if (!serverStatus) return null;
+    const loadText = Array.isArray(serverStatus.load)
+      ? serverStatus.load.slice(0, 3).map((val) => val.toFixed(2)).join(", ")
+      : "";
+    return {
+      cpu: `${Math.round(serverStatus.cpu.percent)}%`,
+      memory: `${formatBytesShort(serverStatus.memory.used)} / ${formatBytesShort(serverStatus.memory.total)} (${Math.round(
+        serverStatus.memory.percent
+      )}%)`,
+      disk: `${formatBytesShort(serverStatus.disk.used)} / ${formatBytesShort(serverStatus.disk.total)} (${Math.round(
+        serverStatus.disk.percent
+      )}%)`,
+      load: loadText,
+      uptime: formatDurationShort(serverStatus.uptime),
+    };
+  }, [serverStatus]);
 
   const bots: BotCardModel[] = symbols.map((s) => {
     const runKey = `${s.SYMBOL_LIGHTER}_${s.SYMBOL_EXTENDED}`;
@@ -118,7 +430,6 @@ export default function App() {
   });
 
   const activeBots = bots.filter((b) => b.status === "running").length;
-  const totalProfit = bots.reduce((sum, b) => sum + (b.profit24h || 0), 0);
 
   async function authCheck() {
     setLoading(true);
@@ -232,6 +543,38 @@ export default function App() {
   }, [pinnedBots]);
 
   useEffect(() => {
+    if (!authed) {
+      setServerStatus(null);
+      setServerStatusError("");
+      return;
+    }
+    let cancelled = false;
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/server/health`, { headers: authHeaders });
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+        const data = await res.json();
+        if (!cancelled) {
+          setServerStatus(data);
+          setServerStatusError("");
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setServerStatusError(err?.message || "Failed to load");
+        }
+      }
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [authed, authHeaders]);
+
+  useEffect(() => {
     if (!authed || selectionRestored) return;
     try {
       const storedPair = localStorage.getItem("selectedPair");
@@ -253,51 +596,23 @@ export default function App() {
   }, [authed, selectionRestored]);
 
   function resetCreateDraft() {
-    setCreateDraft({
-      SYMBOL_LIGHTER: "NEW",
-      SYMBOL_EXTENDED: "NEW-USD",
-      MIN_SPREAD: 0.3,
-      SPREAD_TP: 0.2,
-      REPRICE_TICK: 0,
-      MAX_POSITION_VALUE: 500,
-      MAX_TRADE_VALUE: 25,
-      MAX_OF_OB: 0.3,
-      MAX_TRADES: null,
-      MIN_HITS: 3,
-      TEST_MODE: false,
-      DEDUP_OB: true,
-      WARM_UP_ORDERS: false,
-    });
+    setCreateDraft(makeBotDraft());
     setCreateError("");
   }
 
   async function handleCreateBot() {
-    if (!createDraft.SYMBOL_LIGHTER.trim() || !createDraft.SYMBOL_EXTENDED.trim()) {
+    const newEntry = normalizeBotEntry(createDraft);
+    if (!newEntry?.SYMBOL_LIGHTER || !newEntry?.SYMBOL_EXTENDED) {
       setCreateError("Symbol fields are required");
       return;
     }
-    if (symbols.some((s) => s.SYMBOL_LIGHTER === createDraft.SYMBOL_LIGHTER.trim() && s.SYMBOL_EXTENDED === createDraft.SYMBOL_EXTENDED.trim())) {
+    if (symbols.some((s) => s.SYMBOL_LIGHTER === newEntry.SYMBOL_LIGHTER && s.SYMBOL_EXTENDED === newEntry.SYMBOL_EXTENDED)) {
       setCreateError("Pair already exists");
       return;
     }
     setCreateSaving(true);
     setCreateError("");
     try {
-      const newEntry = {
-        SYMBOL_LIGHTER: createDraft.SYMBOL_LIGHTER.trim(),
-        SYMBOL_EXTENDED: createDraft.SYMBOL_EXTENDED.trim(),
-        MIN_SPREAD: Number(createDraft.MIN_SPREAD),
-        SPREAD_TP: Number(createDraft.SPREAD_TP),
-        REPRICE_TICK: Number(createDraft.REPRICE_TICK),
-        MAX_POSITION_VALUE: createDraft.MAX_POSITION_VALUE === null ? null : Number(createDraft.MAX_POSITION_VALUE),
-        MAX_TRADE_VALUE: Number(createDraft.MAX_TRADE_VALUE),
-        MAX_OF_OB: Number(createDraft.MAX_OF_OB),
-        MAX_TRADES: createDraft.MAX_TRADES === null ? null : Number(createDraft.MAX_TRADES),
-        MIN_HITS: Number(createDraft.MIN_HITS),
-        TEST_MODE: Boolean(createDraft.TEST_MODE),
-        DEDUP_OB: Boolean(createDraft.DEDUP_OB),
-        WARM_UP_ORDERS: Boolean(createDraft.WARM_UP_ORDERS),
-      };
       const postRes = await fetch(`${API_BASE}/api/symbols`, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -316,6 +631,153 @@ export default function App() {
       setCreateError(err?.message || "Failed to create bot");
     } finally {
       setCreateSaving(false);
+    }
+  }
+
+  function parseBulkInput(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return { entries: [] as Partial<CreateBotDraft>[], errors: [] as string[] };
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return { entries: parsed as Partial<CreateBotDraft>[], errors: [] as string[] };
+      }
+      return { entries: [] as Partial<CreateBotDraft>[], errors: ["JSON input must be an array of configs"] };
+    } catch {
+      const entries: Partial<CreateBotDraft>[] = [];
+      const errors: string[] = [];
+      const lines = trimmed.split(/\r?\n/);
+      lines.forEach((line, idx) => {
+        const clean = line.trim();
+        if (!clean) return;
+        const parts = clean.split(/[,\s]+/).filter(Boolean);
+        if (parts.length < 2) {
+          errors.push(`Line ${idx + 1}: expected SYMBOL_LIGHTER and SYMBOL_EXTENDED`);
+          return;
+        }
+        const entry: Partial<CreateBotDraft> = {
+          SYMBOL_LIGHTER: parts[0],
+          SYMBOL_EXTENDED: parts[1],
+        };
+        if (parts[2]) entry.MIN_SPREAD = Number(parts[2]);
+        if (parts[3]) entry.SPREAD_TP = Number(parts[3]);
+        if (parts[4]) entry.MIN_HITS = Number(parts[4]);
+        entries.push(entry);
+      });
+      return { entries, errors };
+    }
+  }
+
+  async function handleBulkCreate() {
+    setBulkError("");
+    setBulkSummary("");
+    if (!bulkPreview.readyEntries.length) {
+      if (!bulkInput.trim()) {
+        setBulkError("Provide at least one pair");
+      } else if (!bulkPreview.counts.total && bulkPreview.parseWarnings.length) {
+        setBulkError(bulkPreview.parseWarnings[0]);
+      } else {
+        setBulkError("No eligible entries to create");
+      }
+      return;
+    }
+    setBulkSaving(true);
+    const currentKeys = new Set(symbols.map((s) => `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`));
+    const created: SymbolCfg[] = [];
+    const skippedExisting: string[] = [];
+    const failed: string[] = [];
+    for (const entry of bulkPreview.readyEntries) {
+      const key = `${entry.SYMBOL_LIGHTER}:${entry.SYMBOL_EXTENDED}`;
+      if (currentKeys.has(key)) {
+        skippedExisting.push(key);
+        continue;
+      }
+      try {
+        const postRes = await fetch(`${API_BASE}/api/symbols`, {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify(entry),
+        });
+        if (!postRes.ok) {
+          const text = await postRes.text();
+          throw new Error(text || "Failed to save bot");
+        }
+        created.push(entry);
+        currentKeys.add(key);
+      } catch (err: any) {
+        failed.push(`${key}${err?.message ? ` (${err.message})` : ""}`);
+      }
+    }
+    if (created.length) {
+      setSymbols((prev) => [...prev, ...created]);
+    }
+    const summaryParts = [];
+    if (created.length) summaryParts.push(`Created ${created.length}`);
+    if (skippedExisting.length) summaryParts.push(`Skipped existing ${skippedExisting.length}`);
+    if (bulkPreview.counts.existing) summaryParts.push(`Existing in input ${bulkPreview.counts.existing}`);
+    if (bulkPreview.counts.duplicates) summaryParts.push(`Duplicates in input ${bulkPreview.counts.duplicates}`);
+    if (bulkPreview.counts.invalid || bulkPreview.parseWarnings.length) summaryParts.push("Some inputs ignored");
+    if (failed.length) summaryParts.push("Some entries failed");
+    if (summaryParts.length) {
+      setMsg(`Bulk add: ${summaryParts.join(" · ")}`);
+    }
+    const lines: string[] = [];
+    if (created.length) {
+      lines.push(`Created: ${created.map((c) => `${c.SYMBOL_LIGHTER}/${c.SYMBOL_EXTENDED}`).join(", ")}`);
+    }
+    const previewExisting = Array.from(
+      new Set(
+        bulkPreview.entryPreviews
+          .filter((entry) => entry.status === "existing" && entry.pairLabel !== "—")
+          .map((entry) => entry.pairLabel)
+      )
+    );
+    if (skippedExisting.length) {
+      lines.push(`Already present (during save): ${skippedExisting.join(", ")}`);
+    } else if (previewExisting.length) {
+      lines.push(`Already present (from input): ${previewExisting.join(", ")}`);
+    }
+    const previewDuplicates = Array.from(
+      new Set(
+        bulkPreview.entryPreviews
+          .filter((entry) => entry.status === "duplicate" && entry.pairLabel !== "—")
+          .map((entry) => entry.pairLabel)
+      )
+    );
+    if (previewDuplicates.length) {
+      lines.push(`Duplicates in input: ${previewDuplicates.join(", ")}`);
+    }
+    const invalidEntries = bulkPreview.entryPreviews.filter((entry) => entry.status === "invalid");
+    if (invalidEntries.length) {
+      lines.push(`Invalid entries: ${invalidEntries.map((entry) => entry.label).join(", ")}`);
+    }
+    if (bulkPreview.parseWarnings.length) {
+      lines.push(`Parse warnings: ${bulkPreview.parseWarnings.join("; ")}`);
+    }
+    if (failed.length) {
+      lines.push(`Failed: ${failed.join("; ")}`);
+    }
+    setBulkSummary(lines.join("\n"));
+    if (
+      !failed.length &&
+      !skippedExisting.length &&
+      !bulkPreview.parseWarnings.length &&
+      bulkPreview.counts.duplicates === 0 &&
+      bulkPreview.counts.existing === 0 &&
+      bulkPreview.counts.invalid === 0
+    ) {
+      setBulkInput("");
+    }
+    setBulkSaving(false);
+  }
+
+  function handleBulkDialogChange(open: boolean) {
+    setBulkOpen(open);
+    if (!open) {
+      setBulkError("");
+      setBulkSummary("");
     }
   }
 
@@ -426,12 +888,33 @@ export default function App() {
                 <span className="text-slate-500">/{bots.length}</span>
               </p>
             </div>
-            <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20 rounded-xl px-4 py-3 text-center sm:text-left">
-              <p className="text-slate-400 text-xs mb-0.5">24h Profit</p>
-              <p className={`text-xl ${totalProfit >= 0 ? "text-green-400" : "text-red-400"}`}>
-                {totalProfit >= 0 ? "+" : ""}
-                {totalProfit.toFixed(2)}%
-              </p>
+            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-4 py-3 min-w-[220px]">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-slate-400 text-xs">Server health</p>
+                {serverStatus && (
+                  <span className="text-[11px] text-slate-500">{new Date(serverStatus.timestamp * 1000).toLocaleTimeString()}</span>
+                )}
+              </div>
+              {serverStatusSummary ? (
+                <div className="text-xs text-slate-200 grid grid-cols-2 gap-x-4 gap-y-1">
+                  <span className="text-slate-400">CPU</span>
+                  <span className="text-right text-white">{serverStatusSummary.cpu}</span>
+                  <span className="text-slate-400">Memory</span>
+                  <span className="text-right text-white">{serverStatusSummary.memory}</span>
+                  <span className="text-slate-400">Disk</span>
+                  <span className="text-right text-white">{serverStatusSummary.disk}</span>
+                  {serverStatusSummary.load && (
+                    <>
+                      <span className="text-slate-400">Load</span>
+                      <span className="text-right text-white">{serverStatusSummary.load}</span>
+                    </>
+                  )}
+                  <span className="text-slate-400">Uptime</span>
+                  <span className="text-right text-white">{serverStatusSummary.uptime}</span>
+                </div>
+              ) : (
+                <p className="text-slate-500 text-sm">{serverStatusError || "Loading..."}</p>
+              )}
             </div>
             <div className="flex justify-end sm:justify-start md:justify-end col-span-2 sm:col-auto">
               <button
@@ -507,6 +990,115 @@ export default function App() {
                       <Plus className="w-4 h-4" />
                       {createSaving ? "Creating..." : "New bot"}
                     </button>
+                    <Dialog open={bulkOpen} onOpenChange={handleBulkDialogChange}>
+                      <DialogTrigger asChild>
+                        <button
+                          type="button"
+                          className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-slate-700 text-sm text-slate-200 hover:text-white hover:bg-slate-800/70 transition w-full sm:w-auto"
+                        >
+                          <Plus className="w-4 h-4" />
+                          Bulk add
+                        </button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-3xl">
+                        <DialogHeader>
+                          <DialogTitle>Bulk add bots</DialogTitle>
+                          <DialogDescription>
+                            Paste JSON (array of configs) or write one pair per line as
+                            <code className="px-1">SYMBOL_LIGHTER SYMBOL_EXTENDED [MIN_SPREAD] [SPREAD_TP] [MIN_HITS]</code>. The preview
+                            highlights duplicates, conflicts, and invalid rows before you submit.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="space-y-4">
+                          <div className="space-y-3">
+                            <textarea
+                              value={bulkInput}
+                              onChange={(e) => setBulkInput(e.target.value)}
+                              rows={10}
+                              className="w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[240px]"
+                              placeholder={`Paste JSON array or one pair per line:\nBTC BTC-USD 0.3 0.2 1\nETH ETH-USD`}
+                            />
+                            {bulkError && <p className="text-sm text-red-400">{bulkError}</p>}
+                            {bulkSummary && (
+                              <pre className="whitespace-pre-wrap rounded-md bg-slate-800/60 p-3 text-xs text-slate-200 border border-slate-700">
+                                {bulkSummary}
+                              </pre>
+                            )}
+                          </div>
+                          <div className="space-y-3">
+                            <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                <div>
+                                  <p className="text-sm text-white">Live preview</p>
+                                  <p className="text-xs text-slate-400">Entries ready to import or needing attention.</p>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {bulkStatChips.map((chip) => (
+                                    <span
+                                      key={chip.label}
+                                      className={`text-xs px-2 py-1 rounded-full border ${chip.className} ${
+                                        chip.value ? "opacity-100" : "opacity-50"
+                                      }`}
+                                    >
+                                      {chip.label}: {chip.value}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className="mt-3 max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 divide-y divide-slate-800/70">
+                                {bulkPreview.entryPreviews.length ? (
+                                  bulkPreview.entryPreviews.map((entry) => (
+                                    <div key={`${entry.label}-${entry.pairLabel}`} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-center sm:justify-between">
+                                      <div>
+                                        <p className="text-sm text-white">
+                                          <span className="font-mono text-xs text-slate-400 mr-2">{entry.label}</span>
+                                          {entry.pairLabel}
+                                        </p>
+                                        {entry.detail && <p className="text-xs text-slate-400">{entry.detail}</p>}
+                                      </div>
+                                      <span
+                                        className={`text-xs px-2 py-1 rounded-full border ${BULK_STATUS_STYLES[entry.status].className}`}
+                                      >
+                                        {BULK_STATUS_STYLES[entry.status].label}
+                                      </span>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div className="p-4 text-sm text-slate-400">Paste entries to see them analyzed here.</div>
+                                )}
+                              </div>
+                            </div>
+                            {bulkPreview.parseWarnings.length > 0 && (
+                              <div className="rounded-lg border border-amber-500/40 bg-slate-900 p-3">
+                                <p className="text-sm font-semibold text-amber-100">Parse warnings</p>
+                                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-100">
+                                  {bulkPreview.parseWarnings.map((warning, idx) => (
+                                    <li key={`${warning}-${idx}`}>{warning}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <DialogFooter>
+                          <button
+                            type="button"
+                            onClick={() => handleBulkDialogChange(false)}
+                            className="px-4 py-2 rounded-lg border border-slate-700 text-slate-200 hover:text-white hover:bg-slate-800/60 transition text-sm"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleBulkCreate}
+                            disabled={bulkSaving}
+                            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition disabled:opacity-60"
+                          >
+                            {bulkSaving ? "Adding..." : "Add bots"}
+                          </button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
                   </div>
                 </div>
               </div>

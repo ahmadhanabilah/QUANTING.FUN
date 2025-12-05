@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import aiohttp
+import psutil
 from datetime import datetime, timezone, timedelta
 from fastapi import Depends, FastAPI, HTTPException, Response, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,8 @@ CONFIG_PATH = ROOT / "config.json"
 LOG_ROOT = BOT_ROOT / "logs"
 ENV_PATH = ROOT / ".env_server"
 ENV_BOT_PATH = ROOT / ".env_bot"
+VENV_PY = ROOT / ".venv" / "bin" / "python"
+PYTHON_BIN = str(VENV_PY) if VENV_PY.exists() else "python3"
 
 
 def _load_env(path: Path):
@@ -88,6 +91,57 @@ def _pair_dir(symbolL: str, symbolE: str) -> Path:
 
 def _tmux_session(symbolL: str, symbolE: str) -> str:
     return f"bot_{symbolL}_{symbolE}"
+
+
+def _gather_server_health() -> dict:
+    """Collect lightweight CPU/memory/disk stats for the UI."""
+    try:
+        per_core = psutil.cpu_percent(interval=0.1, percpu=True)
+    except Exception:
+        per_core = []
+    cpu_percent = round(sum(per_core) / len(per_core), 2) if per_core else round(psutil.cpu_percent(interval=None), 2)
+    mem = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    disk = psutil.disk_usage("/")
+    try:
+        load_avg = os.getloadavg()
+    except (AttributeError, OSError):
+        load_avg = (0.0, 0.0, 0.0)
+    uptime = max(0.0, time.time() - psutil.boot_time())
+    net = psutil.net_io_counters()
+    return {
+        "cpu": {
+            "percent": cpu_percent,
+            "per_core": per_core,
+            "count": psutil.cpu_count() or 0,
+        },
+        "memory": {
+            "total": mem.total,
+            "used": mem.used,
+            "percent": mem.percent,
+            "available": mem.available,
+        },
+        "swap": {
+            "total": swap.total,
+            "used": swap.used,
+            "percent": swap.percent,
+        },
+        "disk": {
+            "total": disk.total,
+            "used": disk.used,
+            "percent": disk.percent,
+            "path": "/",
+        },
+        "load": load_avg,
+        "uptime": uptime,
+        "boot_time": psutil.boot_time(),
+        "process_count": len(psutil.pids()),
+        "net": {
+            "bytes_sent": net.bytes_sent if net else 0,
+            "bytes_recv": net.bytes_recv if net else 0,
+        },
+        "timestamp": time.time(),
+    }
 
 
 async def _get_db(mode: str = "live") -> DBClient:
@@ -363,7 +417,7 @@ def start_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
     session = _tmux_session(symbolL, symbolE)
     if session in _tmux_ls():
         return {"ok": True, "msg": "already running"}
-    cmd = f"cd {ROOT} && python -m bot.core.tt_runner {symbolL} {symbolE}"
+    cmd = f"cd {ROOT} && {PYTHON_BIN} -m bot.core.tt_runner {symbolL} {symbolE}"
     try:
         subprocess.check_call(["tmux", "new-session", "-d", "-s", session, cmd])
         return {"ok": True}
@@ -511,6 +565,11 @@ def trades_csv(symbolL: str, symbolE: str, user: str = Depends(_auth)):
     if not path.exists():
         raise HTTPException(status_code=404)
     return PlainTextResponse(path.read_text(), media_type="text/csv")
+
+
+@app.get("/api/server/health")
+def api_server_health(user: str = Depends(_auth)):
+    return _gather_server_health()
 
 
 @app.get("/api/tt/decisions")

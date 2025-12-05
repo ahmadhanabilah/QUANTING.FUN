@@ -20,7 +20,11 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
         el_val = spreads.get("TT_EL")
         le_txt = f"{le_val:.4f}" if le_val is not None else "N/A"
         el_txt = f"{el_val:.4f}" if el_val is not None else "N/A"
-        print(f"[SPREAD] TT_LE={le_txt} TT_EL={el_txt}", end="\r", flush=True)
+        # Log strong spreads as full lines for easier tracking.
+        if (le_val is not None and le_val > minSpread) or (el_val is not None and el_val > minSpread):
+            print(f"[SPREAD] TT_LE={le_txt} TT_EL={el_txt}")
+        else:
+            print(f"[SPREAD] TT_LE={le_txt} TT_EL={el_txt}", end="\r", flush=True)
     except Exception:
         pass
 

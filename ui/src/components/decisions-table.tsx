@@ -19,6 +19,12 @@ type DecisionRow = {
   ob_e?: string | null;
 };
 
+type InventoryEntry = {
+  venue: string;
+  qty: number | null;
+  price: number | null;
+};
+
 type DecisionsTableProps = {
   botId: string;
   apiBase: string;
@@ -100,8 +106,77 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
     );
   };
 
+  const parseInventoryPayload = (raw?: string | null): InventoryEntry[] | null => {
+    if (!raw) return null;
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("[")) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!Array.isArray(parsed)) return null;
+      return parsed
+        .map((entry: any) => {
+          const venue = typeof entry?.venue === "string" ? entry.venue.toUpperCase() : "";
+          if (!venue) return null;
+          const qty = Number(entry?.qty);
+          const price = Number(entry?.price);
+          return {
+            venue,
+            qty: Number.isFinite(qty) ? qty : null,
+            price: Number.isFinite(price) ? price : null,
+          };
+        })
+        .filter((entry): entry is InventoryEntry => Boolean(entry && entry.venue));
+    } catch {
+      return null;
+    }
+  };
+
+  const calcDeltaFromInventory = (entries: InventoryEntry[]): number | null => {
+    if (!entries?.length) return null;
+    const entryE = entries.find((e) => e.venue === "E");
+    const entryL = entries.find((e) => e.venue === "L");
+    if (!entryE || !entryL) return null;
+    const { qty: eq, price: ee } = entryE;
+    const { qty: lq, price: le } = entryL;
+    if (eq === null || ee === null || lq === null || le === null) return null;
+    if (lq > 0 && eq < 0 && le !== 0) {
+      return ((ee - le) / le) * 100;
+    }
+    if (lq < 0 && eq > 0 && ee !== 0) {
+      return ((le - ee) / ee) * 100;
+    }
+    return null;
+  };
+
+  const formatInventoryEntries = (entries: InventoryEntry[]): string[] => {
+    return entries.map((entry) => {
+      const qty = entry.qty === null ? "—" : entry.qty.toString();
+      const price = entry.price === null ? "—" : Number(entry.price).toFixed(6);
+      return `${entry.venue} -> Qty: ${qty}, Price: ${price}`;
+    });
+  };
+
   const renderInvBlock = (invStr: string | null | undefined, reason?: string | null, spread?: number | null) => {
     if (!invStr) return <div className="text-slate-500 text-xs">—</div>;
+    const parsedInventory = parseInventoryPayload(invStr);
+    if (parsedInventory && parsedInventory.length) {
+      const deltaFromInv = calcDeltaFromInventory(parsedInventory);
+      const deltaText =
+        deltaFromInv !== null
+          ? `Δ -> ${fmt(deltaFromInv, 2)}%`
+          : spread !== null && spread !== undefined
+          ? `Δ -> ${fmt(spread, 2)}%`
+          : "";
+      const formattedEntries = formatInventoryEntries(parsedInventory);
+      return (
+        <div className="space-y-1 text-[11px] text-slate-200 font-mono">
+          {formattedEntries.map((line, idx) => (
+            <div key={`${line}-${idx}`}>{line}</div>
+          ))}
+          {deltaText && <div>{deltaText}</div>}
+        </div>
+      );
+    }
     const longVenue = reason === "TT_EL" || reason === "WARM_UP_EL" ? "E" : "L";
     const shortVenue = longVenue === "L" ? "E" : "L";
     const parts = invStr.split("|").map((p) => p.trim());

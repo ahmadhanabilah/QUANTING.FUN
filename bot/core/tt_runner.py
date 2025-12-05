@@ -1,4 +1,5 @@
-# PYTHONPATH=/root/arb_bot python3 -m bot.core.tt_runner BTC BTC-USD
+# ~/QUANTING.FUN/.venv/bin/python -m bot.core.tt_runner BTC BTC-USD
+
 
 import asyncio
 import logging

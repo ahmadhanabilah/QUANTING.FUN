@@ -54,7 +54,7 @@ start_ui() {
   if tmux has-session -t "$session" 2>/dev/null; then
     echo "UI already running in tmux session $session"
   else
-    cmd="cd $ROOT/ui && npm run dev -- --host --port $UI_PORT"
+    cmd="cd $ROOT/ui && npm run dev -- --host 0.0.0.0 --port $UI_PORT"
     tmux new-session -d -s "$session" "$cmd"
     echo "Started UI in tmux session $session"
   fi

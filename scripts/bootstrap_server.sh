@@ -14,9 +14,15 @@ cd "$ROOT"
 if command -v hostname >/dev/null 2>&1; then
   IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
 fi
-IP_ADDR=${IP_ADDR:-"127.0.0.1"}
+# Prefer the machine's public IP when available so generated configs match the UI origin.
+if command -v curl >/dev/null 2>&1; then
+  PUBLIC_IP=$(curl -fs --max-time 2 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]')
+fi
+IP_ADDR=${PUBLIC_IP:-${IP_ADDR:-"127.0.0.1"}}
 API_HOST="http://${IP_ADDR}:5001"
 CORS_ORIGINS="http://${IP_ADDR}:5000"
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-password}"
 
 apt_install() {
   if command -v sudo >/dev/null 2>&1; then
@@ -43,22 +49,40 @@ npm install
 npm install -D tailwindcss postcss autoprefixer
 cd "$ROOT"
 
+echo "[bootstrap] Setting PostgreSQL password..."
+set_pg_password() {
+  local sql="ALTER USER \"${POSTGRES_USER}\" WITH PASSWORD '${POSTGRES_PASSWORD}';"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u postgres psql -qAt -c "$sql" >/dev/null 2>&1 || true
+  else
+    psql -qAt -c "$sql" >/dev/null 2>&1 || true
+  fi
+}
+set_pg_password
+
 echo "[bootstrap] Writing .env files..."
-cat > .env_server <<EOF
+if [ -f .env_server ]; then
+  echo "[bootstrap] .env_server exists; skipping overwrite"
+else
+  cat > .env_server <<EOF
 # Auth
 AUTH_USER=admin
 AUTH_PASS=admin
 
 # Postgres
-DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
-TEST_DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot_test
+DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/arb_bot
+TEST_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/arb_bot_test
 
 # UI / CORS
 CORS_ORIGINS=${CORS_ORIGINS}
 CORS_ORIGIN_REGEX=
 EOF
+fi
 
-cat > .env_bot <<EOF
+if [ -f .env_bot ]; then
+  echo "[bootstrap] .env_bot exists; skipping overwrite"
+else
+  cat > .env_bot <<EOF
 # Lighter venue
 LIGHTER_API_PRIVATE_KEY=
 LIGHTER_ACCOUNT_INDEX=
@@ -79,14 +103,14 @@ TELEGRAM_TOPIC_ID=
 DB_WATCHDOG_ENABLED=true
 DB_WATCHDOG_PERIOD=60
 
-# DB/Auth (for bot)
-DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/arb_bot
-AUTH_USER=admin
-AUTH_PASS=admin
 EOF
+fi
 
 echo "[bootstrap] Writing config.json (single NEW/NEW-USD pair)..."
-cat > config.json <<'EOF'
+if [ -f config.json ]; then
+  echo "[bootstrap] config.json exists; skipping overwrite"
+else
+  cat > config.json <<'EOF'
 {
   "symbols": [
     {
@@ -107,6 +131,7 @@ cat > config.json <<'EOF'
   ]
 }
 EOF
+fi
 
 echo "[bootstrap] Creating PostgreSQL databases (if server running)..."
 create_db_cmds="
