@@ -52,3 +52,4 @@ bash scripts/update_github.sh
 ```bash
 bash scripts/update_local.sh
 ```
+..
