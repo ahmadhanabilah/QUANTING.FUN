@@ -2,6 +2,7 @@
 node_modules/
 logs/
 bot/logs/
+scripts/csv/
 .env
 .env_bot
 .env_server
@@ -10,3 +11,4 @@ config.json
 __pycache__/
 *.pyc
 ui/build/
+*.csv
