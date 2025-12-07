@@ -1,9 +1,12 @@
 import asyncio
+import html
 import logging
 import os
 import time
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import DefaultDict, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -11,12 +14,49 @@ from bot.common.calc_spreads import calc_spreads
 from bot.venues.helper_extended import ExtendedWS
 from bot.venues.helper_hyperliquid import HyperliquidWS
 
-DEFAULT_THRESHOLD = float(os.getenv("SCREENER_THRESHOLD", "0.3"))  # percent
-ALERT_COOLDOWN = float(os.getenv("SCREENER_COOLDOWN_SEC", "0.01"))
-SPREAD_KEYS = ["TT"]
+
+DEFAULT_THRESHOLD = 0.3
+AGG_SECONDS = 60
+ENABLE_TT = os.getenv("SCREENER_ENABLE_TT", "true").lower() == "true"
+ENABLE_MT = os.getenv("SCREENER_ENABLE_MT", "false").lower() == "true"
+ENABLE_TM = os.getenv("SCREENER_ENABLE_TM", "false").lower() == "true"
+SPREAD_KEYS: List[str] = []
+if ENABLE_TT:
+    SPREAD_KEYS.append("TT")
+if ENABLE_MT:
+    SPREAD_KEYS.append("MT")
+if ENABLE_TM:
+    SPREAD_KEYS.append("TM")
 SPREAD_MAP = {
     "TT": ["TT_LE", "TT_EL"],
+    "MT": ["MT_LE", "MT_EL"],
+    "TM": ["TM_LE", "TM_EL"],
 }
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOPIC_ID = os.getenv("TELEGRAM_TOPIC_ID", "")
+_tg_session: Optional[aiohttp.ClientSession] = None
+_hits: DefaultDict[str, Dict[str, List[Tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
+_hits_lock = asyncio.Lock()
+
+
+async def _send_telegram(text: str, code: bool = False):
+    global _tg_session
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    if _tg_session is None or _tg_session.closed:
+        _tg_session = aiohttp.ClientSession()
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        if code:
+            payload["parse_mode"] = "HTML"
+            payload["text"] = f"<pre>{html.escape(text)}</pre>"
+        if TELEGRAM_TOPIC_ID:
+            payload["message_thread_id"] = TELEGRAM_TOPIC_ID
+        await _tg_session.post(url, data=payload)
+    except Exception as exc:
+        logging.getLogger("Screener").error(f"[Screener] telegram send failed: {exc}")
 
 
 def _parse_pairs(args: List[str]) -> List[Tuple[str, str]]:
@@ -35,7 +75,7 @@ def _parse_pairs(args: List[str]) -> List[Tuple[str, str]]:
 
 
 async def _fetch_extended_markets() -> Dict[str, str]:
-    """Fetch Extended USD markets mapping asset -> market name (e.g. BTC -> BTC-USD)."""
+    """Fetch all Extended markets (USD) mapping asset -> market name (e.g. BTC -> BTC-USD)."""
     url = "https://api.starknet.extended.exchange/api/v1/info/markets"
     try:
         async with aiohttp.ClientSession() as session:
@@ -89,7 +129,7 @@ class PairMonitor:
         self.E = ExtendedWS(symbol_e, read_only=True)
         self.H = HyperliquidWS(symbol_h, read_only=True)
         self._logger = logging.getLogger("Screener")
-        self._last_alert = {k: 0 for k in ["TT_LE", "TT_EL"]}
+        self._last_alert = {k: 0 for k in ["TT_LE", "TT_EL", "MT_LE", "MT_EL", "TM_LE", "TM_EL"]}
 
     async def start(self):
         def on_update():
@@ -117,15 +157,21 @@ class PairMonitor:
                 keys.extend(SPREAD_MAP.get(group, []))
             for key in keys:
                 val = spreads.get(key)
-                if val is None or val <= self.threshold:
+                if val is None:
+                    continue
+                if val <= self.threshold:
                     continue
                 if now - self._last_alert.get(key, 0) < ALERT_COOLDOWN:
                     continue
                 self._last_alert[key] = now
-                self._logger.info(
+                msg = (
                     f"[Screener] {self.symbol_e}:{self.symbol_h} {key}={val:.2f}% "
                     f"H bid/ask={hbid}/{hask} E bid/ask={ebid}/{eask}"
                 )
+                self._logger.info(msg)
+                async with _hits_lock:
+                    _hits[f"{self.symbol_e}/{self.symbol_h}"][key].append((now, val))
+                await _send_telegram(msg)
         except Exception as exc:
             self._logger.error(f"[Screener] spread handler error for {self.symbol_e}:{self.symbol_h}: {exc}")
 
@@ -163,13 +209,48 @@ async def main():
         logging.getLogger("Screener").info(f"[Screener] Matching Pairs: {len(overlap)}")
         pairs = overlap
     if not pairs:
-        logging.getLogger("Screener").error("No pairs provided (ESYM:HSYM) and no overlap found.")
+        logging.getLogger("Screener").error("No pairs provided (format ESYM:HSYM via args or SCREEN_PAIRS env)")
         return
 
     monitors = [PairMonitor(e, h, DEFAULT_THRESHOLD) for e, h in pairs]
     tasks = [asyncio.create_task(m.start()) for m in monitors]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for idx, res in enumerate(results):
+
+    async def aggregator():
+        logger = logging.getLogger("Screener")
+
+        def _median(values: List[float]) -> float:
+            values = sorted(values)
+            n = len(values)
+            if n == 0:
+                return 0.0
+            mid = n // 2
+            if n % 2 == 1:
+                return values[mid]
+            return (values[mid - 1] + values[mid]) / 2
+
+        while True:
+            await asyncio.sleep(AGG_SECONDS)
+            now = time.time()
+            rows = []
+            async with _hits_lock:
+                for pair, key_map in list(_hits.items()):
+                    for key, vals in list(key_map.items()):
+                        key_map[key] = [(ts, v) for ts, v in vals if ts >= now - AGG_SECONDS]
+                        if not key_map[key]:
+                            continue
+                        spreads_only = [v for _, v in key_map[key]]
+                        rows.append((pair, key, len(spreads_only), max(spreads_only), _median(spreads_only)))
+            if rows:
+                rows.sort(key=lambda r: r[3], reverse=True)
+                lines = [
+                    f"{pair} {key} hits={cnt} max={mx:.2f}% med={med:.2f}%"
+                    for pair, key, cnt, mx, med in rows
+                ]
+                msg = "[Screener agg " + datetime.utcnow().strftime("%H:%M:%S") + "] " + "; ".join(lines)
+                logger.info(msg)
+
+    results = await asyncio.gather(*tasks, aggregator(), return_exceptions=True)
+    for idx, res in enumerate(results[:-1]):  # last is aggregator
         if isinstance(res, Exception):
             logging.getLogger("Screener").error(
                 f"[Screener] monitor {monitors[idx].symbol_e}:{monitors[idx].symbol_h} crashed: {res}"
