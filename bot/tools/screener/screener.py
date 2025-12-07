@@ -202,16 +202,16 @@ async def main():
     import sys
     pairs = _parse_pairs(sys.argv[1:])
     if not pairs:
-        # autodiscover pairs present on both venues (any quote)
+        # autodiscover pairs present on both venues (USD quote)
         lighter_syms, extended_map = await asyncio.gather(
             _fetch_lighter_symbols(), _fetch_extended_markets()
         )
         logger = logging.getLogger("Screener")
-        logger.info(f"[Screener] lighter symbols: {len(lighter_syms)} extended USD markets: {len(extended_map)}")
         pairs = []
         for sym in lighter_syms:
             if sym in extended_map:
                 pairs.append((sym, extended_map[sym]))
+        logger.info(f"[Screener] Matching Pairs: {len(pairs)}")
         if not pairs:
             logger.error(
                 f"No pairs provided and no overlap detected between Lighter and Extended. "
@@ -219,7 +219,6 @@ async def main():
                 f"example extended assets={list(extended_map.keys())[:5]}"
             )
             return
-        logger.info(f"[Screener] autodiscovered pairs: {pairs}")
 
     monitors = [PairMonitor(l, e, DEFAULT_THRESHOLD) for l, e in pairs]
     tasks = [asyncio.create_task(m.start()) for m in monitors]
