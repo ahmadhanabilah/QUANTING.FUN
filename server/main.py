@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_ROOT = ROOT / "bot"
 CONFIG_PATH = ROOT / "config.json"
 LOG_ROOT = BOT_ROOT / "logs"
+TMUX_LOG_DIR = ROOT / "logs"
 ENV_PATH = ROOT / ".env_server"
 ENV_BOT_PATH = ROOT / ".env_bot"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
@@ -91,6 +92,16 @@ def _pair_dir(symbolL: str, symbolE: str) -> Path:
 
 def _tmux_session(symbolL: str, symbolE: str) -> str:
     return f"bot_{symbolL}_{symbolE}"
+
+def _save_tmux_log(session: str, pane: str = "0") -> None:
+    TMUX_LOG_DIR.mkdir(exist_ok=True)
+    target = f"{session}:{pane}"
+    outfile = TMUX_LOG_DIR / f"tmux_{session}.log"
+    try:
+        subprocess.check_call(["tmux", "capture-pane", "-t", target, "-S", "-", "-e"])
+        subprocess.check_call(["tmux", "save-buffer", str(outfile)])
+    finally:
+        subprocess.call(["tmux", "delete-buffer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _gather_server_health() -> dict:
@@ -417,7 +428,7 @@ def start_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
     session = _tmux_session(symbolL, symbolE)
     if session in _tmux_ls():
         return {"ok": True, "msg": "already running"}
-    cmd = f"cd {ROOT} && {PYTHON_BIN} -m bot.core.tt_runner {symbolL} {symbolE}"
+    cmd = f"cd {ROOT} && {PYTHON_BIN} -m bot.core.tt_bot {symbolL} {symbolE}"
     try:
         subprocess.check_call(["tmux", "new-session", "-d", "-s", session, cmd])
         return {"ok": True}
@@ -431,6 +442,10 @@ def stop_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
     if session not in _tmux_ls():
         return {"ok": True, "msg": "not running"}
     try:
+        try:
+            _save_tmux_log(session)
+        except Exception as exc:
+            print(f"[stop_bot] failed to capture logs for {session}: {exc}")
         subprocess.check_call(["tmux", "kill-session", "-t", session])
         return {"ok": True}
     except subprocess.CalledProcessError as exc:
@@ -586,6 +601,7 @@ async def api_tt_decisions(symbolL: str, symbolE: str, mode: str = "live", limit
                 "reason": r.get("reason"),
                 "direction": r.get("direction"),
                 "spread_signal": r.get("spread_signal"),
+                "size": r.get("size"),
                 "ob_l": r.get("ob_l"),
                 "ob_e": r.get("ob_e"),
                 "inv_before_str": r.get("inv_before"),

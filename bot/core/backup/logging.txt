@@ -1,0 +1,29 @@
+Logging surfaces in tt_bot
+==========================
+
+Formatter / handler
+- Default formatter: "%(asctime)s %(levelname)s:%(name)s:%(message)s"
+- All loggers below share the console handler installed in _configure_console_logging().
+
+_TT (main TT bot)
+- [CONFIG] L=MEGA E=MEGA-USD minSpread=0.4 spreadTP=0.2 repriceTick=0 maxPosValue=500 minHits=3 dedup=False warmUp=False maxTrades=None
+- [DECISION MADE] abc123 TT_LE entry
+- [BOTH VENUES FILLED]
+- [FILLED LIG] abc123
+- [FILLED EXT] abc123
+- [INIT] L:0.0@0.0 | E:0.0@0.0 | Δ:0.0000%
+
+DB (decision/trade/fill persistence)
+- [INSERT DECISION] abc123
+- [INSERT TRADE] abc123 L
+- [INSERT FILL] abc123 L 0.25 128.39
+- [ERROR INSERT DECISION]
+- [ERROR INSERT TRADE]
+- [ERROR INSERT FILL]
+
+Venue helpers
+- LIG / EXT log websocket/REST activity (not detailed here; see respective helper files). They remain wired to the console handler.
+
+Other
+- Hedge logger is attached to console but unused in TT-only mode.
+- CSV-style Trades logger is disabled; no CSV rows are emitted.

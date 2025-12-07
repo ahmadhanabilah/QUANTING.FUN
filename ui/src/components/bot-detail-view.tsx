@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Power, TrendingUp, Settings, ListChecks } from 'lucide-react';
+import { TrendingUp, Settings, ListChecks, LayoutDashboard, Power, Trash2 } from 'lucide-react';
 import { DecisionsTable } from './decisions-table';
 import { TradesTable } from './trades-table';
 import { BotSettings } from './bot-settings';
 
-type DetailTab = 'decisions' | 'trades' | 'settings';
-
 const NUMBER_FIELDS = ['MIN_SPREAD', 'SPREAD_TP', 'REPRICE_TICK', 'MAX_POSITION_VALUE', 'MAX_TRADE_VALUE', 'MAX_OF_OB', 'MAX_TRADES', 'MIN_HITS'];
 const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS'];
 
-export type DetailTab = 'decisions' | 'trades' | 'settings';
+export type DetailTab = 'dashboard' | 'decisions' | 'trades' | 'settings';
 
 interface BotDetailViewProps {
   bot: {
@@ -23,13 +21,14 @@ interface BotDetailViewProps {
   apiBase: string;
   authHeaders: Record<string, string>;
   mode: 'live' | 'test';
-  onToggle: () => void;
   onBack?: () => void;
   initialTab?: DetailTab;
   onTabChange?: (tab: DetailTab) => void;
   onClose?: () => void;
   onModeChange?: (mode: 'live' | 'test') => void;
   onSettingsSaved?: (draft: any) => void;
+  onToggle?: () => void;
+  onDelete?: () => void;
 }
 
 export function BotDetailView({
@@ -37,13 +36,14 @@ export function BotDetailView({
   apiBase,
   authHeaders,
   mode,
-  onToggle,
   onBack,
-  initialTab = 'logs',
+  initialTab = 'dashboard',
   onTabChange,
   onClose,
   onModeChange,
   onSettingsSaved,
+  onToggle,
+  onDelete,
 }: BotDetailViewProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>(initialTab);
   const [configSymbols, setConfigSymbols] = useState<any[]>([]);
@@ -51,7 +51,6 @@ export function BotDetailView({
   const [settingsOriginal, setSettingsOriginal] = useState<any | null>(null);
   const [settingsError, setSettingsError] = useState('');
   const [settingsLoading, setSettingsLoading] = useState(false);
-  const isRunning = bot.status === 'running';
   const [symbolL, symbolE] = bot.id.split(':');
   const pairLabel = useMemo(() => (symbolL && symbolE ? `${symbolL}/${symbolE}` : bot.name), [symbolE, symbolL, bot.name]);
 
@@ -173,84 +172,46 @@ export function BotDetailView({
   };
 
   const tabs = [
+    { id: 'dashboard' as DetailTab, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'decisions' as DetailTab, label: 'Decisions', icon: ListChecks },
     { id: 'trades' as DetailTab, label: 'Trades', icon: TrendingUp },
     { id: 'settings' as DetailTab, label: 'Bot Settings', icon: Settings },
   ];
 
-  return (
-    <div>
-      {/* Bot status card */}
-      <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 rounded-xl p-6 mb-6 shadow-xl">
-        <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              {onBack && (
-                <button
-                  onClick={onBack}
-                  className="p-2 rounded-lg border border-slate-800/60 bg-slate-900/60 text-slate-300 hover:text-white hover:border-slate-700/80 transition"
-                >
-                  <span className="text-xs">Back</span>
-                </button>
-              )}
-              <div className={`p-4 rounded-xl ${
-                isRunning 
-                  ? 'bg-green-500/10 border border-green-500/20' 
-                  : 'bg-slate-800/50 border border-slate-700/50'
-            }`}>
-              <div className="flex items-center gap-2">
-                <div className={`w-3 h-3 rounded-full ${isRunning ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
-                <span className={`text-sm ${isRunning ? 'text-green-400' : 'text-slate-400'}`}>
-                  {isRunning ? 'Running' : 'Stopped'}
-                </span>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center gap-6 flex-wrap justify-end">
-            <div className="text-center px-6 py-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
-              <p className="text-slate-400 text-xs mb-1">24h Profit</p>
-              <p className={`text-2xl ${bot.profit24h >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {bot.profit24h >= 0 ? '+' : ''}{bot.profit24h.toFixed(2)}%
-              </p>
-            </div>
-            <div className="text-center px-6 py-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
-              <p className="text-slate-400 text-xs mb-1">24h Trades</p>
-              <p className="text-2xl text-white">{bot.trades24h}</p>
-            </div>
-            <button
-              onClick={onToggle}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl transition-all shadow-lg ${
-                isRunning
-                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/30 shadow-red-500/20'
-                  : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/30 shadow-green-500/20'
-              }`}
-            >
-              <Power className="w-4 h-4" />
-              {isRunning ? 'Stop Bot' : 'Start Bot'}
-            </button>
-          </div>
-        </div>
-      </div>
+  const statusStyles =
+    bot.status === 'running'
+      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+      : 'border-rose-500/30 bg-rose-500/10 text-rose-200';
 
+  const formattedProfit = (bot.profit24h ?? 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const formattedTrades = (bot.trades24h ?? 0).toLocaleString();
+
+  return (
+    <div className="flex flex-col min-h-[calc(100vh-200px)] min-h-0">
       {/* Tabs */}
       <div className="bg-slate-900/30 backdrop-blur-sm border border-slate-800/50 rounded-t-xl overflow-hidden">
-        <nav className="flex gap-1 px-2 pt-2">
+        <nav className="flex flex-wrap gap-1 px-2 pt-2 w-full justify-between sm:justify-start">
           {tabs.map(tab => {
             const Icon = tab.icon;
             return (
               <button
                 key={tab.id}
-                onClick={() => {
+                onClick={(e) => {
+                  e.currentTarget.blur();
                   setActiveTab(tab.id);
                   onTabChange?.(tab.id);
                 }}
-                className={`flex items-center gap-2 px-5 py-3 rounded-t-xl transition-all ${
+                className={`outline-none focus:outline-none flex items-center gap-2 px-4 py-3 rounded-t-xl transition-all w-full flex-1 justify-center sm:w-auto sm:flex-none sm:justify-start ${
                   activeTab === tab.id
-                    ? 'bg-slate-900 text-white border-t border-x border-slate-800/50 shadow-lg'
+                    ? 'bg-slate-900 text-white shadow-lg'
                     : 'text-slate-400 hover:text-slate-300 hover:bg-slate-800/30'
                 }`}
               >
                 <Icon className="w-4 h-4" />
-                {tab.label}
+                <span className="hidden sm:inline">{tab.label}</span>
               </button>
             );
           })}
@@ -258,7 +219,57 @@ export function BotDetailView({
       </div>
 
       {/* Tab content */}
-      <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 border-t-0 rounded-b-xl p-6 shadow-xl">
+      <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 border-t-0 rounded-b-xl p-6 shadow-xl flex-1 flex flex-col">
+        {activeTab === 'dashboard' && (
+          <div className="flex flex-1 md:items-center md:justify-center">
+            <div className="space-y-4 md:max-w-6xl md:mx-auto w-full">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="border border-slate-800/70 rounded-xl p-8 bg-slate-950/60 flex flex-col gap-4 min-h-[180px] shadow-lg shadow-black/30 justify-center">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Start / Stop</p>
+                <button
+                  type="button"
+                  onClick={() => onToggle?.()}
+                  className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg border text-sm font-semibold transition-all ${
+                    bot.status === 'running'
+                      ? 'border-rose-500/60 text-rose-200 hover:bg-rose-500/20'
+                      : 'border-emerald-500/60 text-emerald-200 hover:bg-emerald-500/20'
+                  }`}
+                >
+                  <Power className="w-4 h-4" />
+                  {bot.status === 'running' ? 'Stop Bot' : 'Start Bot'}
+                </button>
+              </div>
+              <div className="border border-slate-800/70 rounded-xl p-8 bg-slate-950/60 flex flex-col gap-4 min-h-[180px] shadow-lg shadow-black/30 justify-center">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Delete Bot</p>
+                <button
+                  type="button"
+                  onClick={() => onDelete?.()}
+                  className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-red-500/60 text-red-200 hover:bg-red-500/20 text-sm font-semibold transition-all"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="border border-slate-800/70 rounded-xl p-8 bg-slate-950/60 flex flex-col justify-center min-h-[180px] gap-4 shadow-lg shadow-black/30">
+                <p className="text-xs uppercase tracking-wide text-slate-400 mb-2">Status</p>
+                <span className={`inline-flex items-center justify-center px-3 py-1 rounded-full border text-sm font-medium ${statusStyles}`}>
+                  {bot.status === 'running' ? 'Running' : 'Stopped'}
+                </span>
+              </div>
+              <div className="border border-slate-800/70 rounded-xl p-8 bg-slate-950/60 min-h-[180px] flex flex-col justify-center gap-2 shadow-lg shadow-black/30">
+                <p className="text-xs uppercase tracking-wide text-slate-400 mb-1">24h Profit</p>
+                <p className="text-2xl font-semibold text-white">{formattedProfit}</p>
+              </div>
+              <div className="border border-slate-800/70 rounded-xl p-8 bg-slate-950/60 min-h-[180px] flex flex-col justify-center gap-2 shadow-lg shadow-black/30">
+                <p className="text-xs uppercase tracking-wide text-slate-400 mb-1">24h Trades</p>
+                <p className="text-2xl font-semibold text-white">{formattedTrades}</p>
+              </div>
+            </div>
+          </div>
+          </div>
+        )}
         {activeTab === 'decisions' && (
           <DecisionsTable botId={bot.id} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
@@ -266,28 +277,28 @@ export function BotDetailView({
           <TradesTable botId={bot.id} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
         {activeTab === 'settings' && (
-            <div className="space-y-3">
-              {settingsError && (
-                <div className="px-4 py-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-sm">
-                  {settingsError}
-                </div>
-              )}
-              {settingsLoading && (
-                <div className="px-4 py-6 text-slate-400 text-sm">Loading config for {pairLabel}...</div>
-              )}
-              {!settingsLoading && settingsDraft && (
-                <BotSettings
-                  pairLabel={pairLabel}
-                  draft={settingsDraft}
-                  numberFields={NUMBER_FIELDS}
-                  boolFields={BOOL_FIELDS}
-                  onNumberChange={handleNumberChange}
-                  onSymbolChange={handleSymbolChange}
-                  onToggle={handleToggle}
-                  onReset={handleReset}
-                  onSave={handleSave}
-                />
-              )}
+          <div className="space-y-3">
+            {settingsError && (
+              <div className="px-4 py-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-sm">
+                {settingsError}
+              </div>
+            )}
+            {settingsLoading && (
+              <div className="px-4 py-6 text-slate-400 text-sm">Loading config for {pairLabel}...</div>
+            )}
+            {!settingsLoading && settingsDraft && (
+              <BotSettings
+                pairLabel={pairLabel}
+                draft={settingsDraft}
+                numberFields={NUMBER_FIELDS}
+                boolFields={BOOL_FIELDS}
+                onNumberChange={handleNumberChange}
+                onSymbolChange={handleSymbolChange}
+                onToggle={handleToggle}
+                onReset={handleReset}
+                onSave={handleSave}
+              />
+            )}
             {!settingsLoading && !settingsDraft && !settingsError && (
               <div className="px-4 py-6 text-slate-400 text-sm">
                 No config found for this pair. Please add it to config.json.

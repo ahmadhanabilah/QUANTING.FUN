@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Optional
 
@@ -14,7 +15,7 @@ from lighter import WsClient
 from bot.common.enums import Side, Venue
 
 logger = logging.getLogger("LIG")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.INFO)
 LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 
 
@@ -47,9 +48,14 @@ class LighterWS:
         }
         self.position_qty: float = 0.0
         self.position_entry: float = 0.0
+        self._has_account_position: bool = False
+        self._got_first_ob: bool = False
+        self._got_first_trades: bool = False
+        self._got_first_positions: bool = False
         self.last_fill_price: float = 0.0
         self.account_callback: Optional[Callable[[float], None]] = None
         self.inventory_callback: Optional[Callable[[float], None]] = None
+        self.position_state_cb: Optional[Callable[[float, float], None]] = None
         self.config = {
             "base_url": LIGHTER_BASE_URL,
             "private_key": os.getenv("LIGHTER_API_PRIVATE_KEY"),
@@ -63,6 +69,7 @@ class LighterWS:
         self._account_task: Optional[asyncio.Task] = None
         self.auth_token: Optional[str] = None
         self._ws_session: Optional[aiohttp.ClientSession] = None
+        self._seen_trade_ids = deque(maxlen=5000)
 
     # ---------- public API ----------
 
@@ -231,9 +238,17 @@ class LighterWS:
         async def run_ws():
             while True:
                 try:
+                    got_first = False
+                    def _wrapped_ob_update(market_id, order_book):
+                        nonlocal got_first
+                        if not got_first:
+                            logger.info("[GOT THE FIRST WS NOTIF - OB]")
+                            got_first = True
+                            self._got_first_ob = True
+                        self._handle_orderbook(market_id, order_book)
                     self.ws_client = WsClient(
                         order_book_ids=[self.market_id],
-                        on_order_book_update=self._handle_orderbook,
+                        on_order_book_update=_wrapped_ob_update,
                     )
                     await self.ws_client.run_async()
                 except Exception as e:
@@ -307,25 +322,46 @@ class LighterWS:
             total_qty = 0.0
             last_price = None
             delta_value = 0.0  # track signed notionals to compute weighted price safely
-            for t in trades:
+            def _get(obj, key, default=None):
+                if obj is None:
+                    return default
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
                 try:
-                    if int(t.get("market_id", 0)) != int(self.market_id):
+                    return getattr(obj, key)
+                except Exception:
+                    return default
+            for t in trades:
+                if t is None:
+                    continue
+                try:
+                    market_id_val = _get(t, "market_id", 0)
+                    trade_id_val = _get(t, "trade_id", None)
+                    if trade_id_val is not None and trade_id_val in self._seen_trade_ids:
+                        continue
+                    if int(market_id_val or 0) != int(self.market_id):
                         continue
                     # presence checks
-                    account_is_ask = int(t.get("ask_account_id", -1)) == acct_id
-                    account_is_bid = int(t.get("bid_account_id", -1)) == acct_id
+                    # print(f"[FILL NOTIF LIG] {t}")
+                    account_is_ask = int(_get(t, "ask_account_id", -1) or -1) == acct_id
+                    account_is_bid = int(_get(t, "bid_account_id", -1) or -1) == acct_id
                     if not (account_is_ask or account_is_bid):
                         continue
-                    maker_is_ask = bool(t.get("is_maker_ask"))
+                    maker_is_ask = bool(_get(t, "is_maker_ask"))
                     is_maker = (
                         (maker_is_ask and account_is_ask) or
                         (not maker_is_ask and account_is_bid)
                     )
-                    size = float(t.get("size") or 0)
+                    size = float(_get(t, "size", 0) or 0)
                     if size <= 0:
                         continue
                     try:
-                        px_val = float(t.get("price") or t.get("ask_price") or t.get("bid_price") or 0)
+                        px_val = float(
+                            _get(t, "price")
+                            or _get(t, "ask_price")
+                            or _get(t, "bid_price")
+                            or 0
+                        )
                         if px_val > 0:
                             last_price = px_val
                     except Exception:
@@ -340,14 +376,13 @@ class LighterWS:
                     elif account_is_bid:
                         total_qty += size
                         delta_value += size * (last_price or 0)
+                    if trade_id_val is not None:
+                        self._seen_trade_ids.append(trade_id_val)
                 except Exception as exc:
                     logger.debug(f"trade parse error: {exc}")
                     continue
-            # update running avg entry with last fill price first so downstream logs see it
             if total_qty != 0:
-                prev_qty = getattr(self, "position_qty", 0.0)
-                prev_entry = getattr(self, "position_entry", 0.0)
-                # if last_price missing, derive from delta_value / total_qty when possible
+                # track last fill price for downstream logging; entry comes from positions feed
                 px = last_price
                 if (px is None or px <= 0) and total_qty != 0 and delta_value != 0:
                     px = delta_value / total_qty
@@ -358,23 +393,72 @@ class LighterWS:
                         px = self.ob["askPrice"] if total_qty < 0 else self.ob["bidPrice"]
                 if px and px > 0:
                     self.last_fill_price = px
-                    new_qty = prev_qty + total_qty
-                    if new_qty == 0:
-                        new_entry = 0.0
-                    elif prev_qty == 0 or (prev_qty > 0 > new_qty) or (prev_qty < 0 < new_qty):
-                        new_entry = px
-                    else:
-                        new_entry = (prev_qty * prev_entry + total_qty * px) / new_qty
-                    self.position_qty = new_qty
-                    self.position_entry = new_entry
-                    if getattr(self, "position_state_cb", None):
-                        self.position_state_cb(new_qty, new_entry)
             if maker_qty != 0 and self.account_callback:
                 self.account_callback(maker_qty)
             if total_qty != 0 and self.inventory_callback:
                 self.inventory_callback(total_qty)
         except Exception as exc:
             logger.error(f"handle_account_update error: {exc}")
+
+    def _handle_positions_update(self, payload) -> None:
+        """Handle account_all_positions snapshots/updates."""
+        try:
+            if not payload or not isinstance(payload, dict):
+                return
+            positions = payload.get("positions")
+            if not positions:
+                return
+            pos = None
+            if isinstance(positions, dict):
+                pos = positions.get(str(self.market_id)) or positions.get(self.market_id)
+            elif isinstance(positions, list):
+                pos = next(
+                    (p for p in positions if int(p.get("market_id", -1)) == int(self.market_id)),
+                    None,
+                )
+            if not pos:
+                # if snapshot omits our market, treat as flat
+                if self.position_qty != 0:
+                    self.position_qty = 0.0
+                    self.position_entry = 0.0
+                    self._has_account_position = True
+                    if self.position_state_cb:
+                        self.position_state_cb(self.position_qty, self.position_entry)
+                else:
+                    self._has_account_position = True
+                return
+            
+            # print(f"[POSITION UPDATE LIG] {pos}")
+
+            qty_val = float(pos.get("position") or pos.get("size") or 0)
+            sign_val = pos.get("sign")
+            side_val = str(pos.get("side", "")).upper()
+            sign = None
+            if sign_val is not None:
+                try:
+                    sign = int(sign_val)
+                except Exception:
+                    sign = None
+            if sign is None:
+                sign = -1 if side_val == "SHORT" else 1
+            qty = qty_val * sign
+            entry = float(
+                pos.get("avg_entry_price")
+                or pos.get("openPrice")
+                or pos.get("open_price")
+                or 0
+            )
+                        
+            if qty == 0:
+                entry = 0.0
+            self.position_qty = qty
+            self.position_entry = entry
+            self._has_account_position = True
+            self._got_first_positions = True
+            if self.position_state_cb:
+                self.position_state_cb(qty, entry)
+        except Exception as exc:
+            logger.error(f"handle_positions_update error: {exc}")
 
     # ---------- trading helpers ----------
 
@@ -399,18 +483,25 @@ class LighterWS:
 
         async def subscribe_account_orders():
             url = "wss://mainnet.zklighter.elliot.ai/stream"
-            sub_msg = {
-                "type": "subscribe",
-                "channel": f"account_all_trades/{self.config['account_id']}",
-                "auth": self.auth_token,
-            }
             while True:
                 try:
                     if not self._ws_session:
                         self._ws_session = aiohttp.ClientSession()
+                    sub_trades = {
+                        "type": "subscribe",
+                        "channel": f"account_all_trades/{self.config['account_id']}",
+                        "auth": self.auth_token,
+                    }
+                    sub_positions = {
+                        "type": "subscribe",
+                        "channel": f"account_all_positions/{self.config['account_id']}",
+                        "auth": self.auth_token,
+                    }
+                    logger.info("Subscribing [OB, all_trades, all_positions]")
                     async with self._ws_session.ws_connect(url, heartbeat=30) as ws:
-                        await ws.send_json(sub_msg)
-                        logger.info("Subscribed [OB, Acc]")
+                        await ws.send_json(sub_trades)
+                        await ws.send_json(sub_positions)
+                        got_first = {"trades": False, "positions": False}
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 data = msg.json()
@@ -423,6 +514,24 @@ class LighterWS:
                                     logger.warning("auth expired; refreshing token")
                                     await self._refresh_auth_token(force=True)
                                     break  # reconnect with new token
+                                if isinstance(data, dict) and (
+                                    data.get("type") == "update/account_all_positions"
+                                    or str(data.get("channel", "")).startswith("account_all_positions")
+                                ):
+                                    if not got_first["positions"]:
+                                        logger.info("[GOT THE FIRST WS NOTIF - ALL_POSITIONS]")
+                                        got_first["positions"] = True
+                                        self._got_first_positions = True
+                                    self._handle_positions_update(data)
+                                    continue
+                                if isinstance(data, dict) and (
+                                    data.get("type") == "update/account_all_trades"
+                                    or str(data.get("channel", "")).startswith("account_all_trades")
+                                ):
+                                    if not got_first["trades"]:
+                                        logger.info("[GOT THE FIRST WS NOTIF - ALL_TRADES]")
+                                        got_first["trades"] = True
+                                        self._got_first_trades = True
                                 self._handle_account_update(data)
                             elif msg.type == aiohttp.WSMsgType.ERROR:
                                 raise RuntimeError(f"Lighter account WS error: {ws.exception()}")
@@ -521,12 +630,9 @@ class LighterWS:
         base_amount = self._fmt_decimal_int(size, self.size_decimals or 0)
         client_order_index = self._next_client_order_index()
 
-        prep_ts = time.perf_counter()
-        logger.info(
-                f"send_market payload "
-                f"market_id={self.market_id} price={px} size={base_amount} is_ask={is_ask}"
-            )
         try:
+            logger.info(f"send_market")
+            wall_start = time.time()
             api_start = time.perf_counter()
             await self._ensure_trade_ws()
             tx_type, tx_info, tx_hash, err = self.trading_client.sign_create_order(
@@ -544,11 +650,8 @@ class LighterWS:
                 raise RuntimeError(err)
             await self._send_tx(tx_type, tx_info)
             api_ms = (time.perf_counter() - api_start) * 1000
-            total_ms = (time.perf_counter() - prep_ts) * 1000
-            logger.info(
-                f"send_market done order_id={client_order_index} api_ms={api_ms:.1f} total_ms={total_ms:.1f} "
-                f"price={px} size={base_amount} is_ask={is_ask}"
-            )
+            wall_end = time.time()
+            logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
             return {
                 "payload": {"price": px, "size": base_amount, "is_ask": is_ask},
                 "resp": tx_info,

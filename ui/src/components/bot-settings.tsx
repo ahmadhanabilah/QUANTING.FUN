@@ -110,7 +110,7 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumb
             onClick={onReset}
           >
             <RefreshCcw className="w-4 h-4" />
-            Reset
+            <span className="hidden sm:inline">Reset</span>
           </button>
           <button
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-lg transition-all text-sm shadow-lg shadow-blue-500/25 disabled:opacity-60"
@@ -118,7 +118,7 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumb
             disabled={saving}
           >
             <Save className="w-4 h-4" />
-            {saving ? "Saving..." : "Save Changes"}
+            <span className="hidden sm:inline">{saving ? "Saving..." : "Save Changes"}</span>
           </button>
         </div>
       </div>
@@ -170,20 +170,23 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumb
           >
             <div>
               <p className="text-slate-200 text-sm font-medium">{setting.label}</p>
-              <p className="text-slate-400 text-xs">{setting.enabled ? "Enabled" : "Disabled"}</p>
               <p className="text-slate-500 text-xs mt-1">{setting.description}</p>
             </div>
             <button
               onClick={() => onToggle(setting.key, !setting.enabled)}
-              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-all shadow-inner ${
-                setting.enabled ? "bg-gradient-to-r from-blue-500 to-blue-600" : "bg-slate-700"
+              aria-pressed={setting.enabled}
+              className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                setting.enabled
+                  ? "bg-blue-600/20 border-blue-500/60 text-blue-200"
+                  : "bg-slate-800/60 border-slate-600 text-slate-200"
               }`}
             >
               <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform ${
-                  setting.enabled ? "translate-x-6" : "translate-x-1"
+                className={`h-2.5 w-2.5 rounded-full ${
+                  setting.enabled ? "bg-blue-400 shadow-blue-400/50 shadow" : "bg-slate-500"
                 }`}
               />
+              {setting.enabled ? "On" : "Off"}
             </button>
           </div>
         ))}

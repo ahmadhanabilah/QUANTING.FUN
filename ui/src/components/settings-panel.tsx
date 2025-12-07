@@ -53,7 +53,6 @@ export function SettingsPanel({ envLines, onChange, onSave, onReset }: SettingsP
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-white mb-1 text-lg">Environment Settings</h2>
-          <p className="text-slate-400 text-sm">Configure your bot environment variables</p>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -62,7 +61,7 @@ export function SettingsPanel({ envLines, onChange, onSave, onReset }: SettingsP
             className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 disabled:opacity-60 text-white rounded-lg transition-all text-sm border border-slate-700/50"
           >
             <RotateCcw className={`w-4 h-4 ${resetting ? "animate-spin" : ""}`} />
-            Reset
+            <span className="hidden sm:inline">Reset</span>
           </button>
           <button
             onClick={handleSave}
@@ -70,7 +69,7 @@ export function SettingsPanel({ envLines, onChange, onSave, onReset }: SettingsP
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:opacity-60 text-white rounded-lg transition-all text-sm shadow-lg shadow-blue-500/25"
           >
             <Save className={`w-4 h-4 ${saving ? "animate-pulse" : ""}`} />
-            Save Changes
+            <span className="hidden sm:inline">Save Changes</span>
           </button>
         </div>
       </div>
@@ -140,36 +139,6 @@ export function SettingsPanel({ envLines, onChange, onSave, onReset }: SettingsP
         )}
       </div>
 
-      <div className="mb-6">
-        <button className="w-full p-5 bg-slate-900/30 border border-slate-800/50 border-dashed rounded-xl text-slate-400 hover:text-slate-300 hover:border-slate-700/50 hover:bg-slate-800/30 transition-all text-sm">
-          + Add New Variable
-        </button>
-      </div>
-
-      <div className="p-5 bg-gradient-to-br from-blue-500/5 to-purple-500/5 border border-blue-500/20 rounded-xl">
-        <h3 className="text-slate-200 text-sm mb-3 font-medium flex items-center gap-2">
-          <span className="w-1 h-4 bg-gradient-to-b from-blue-500 to-purple-500 rounded-full" />
-          Configuration Tips
-        </h3>
-        <ul className="space-y-2 text-slate-400 text-sm">
-          <li className="flex items-start gap-2">
-            <span className="text-blue-400 mt-0.5">•</span>
-            <span>Store sensitive API keys and secrets securely</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-blue-400 mt-0.5">•</span>
-            <span>Test configuration changes with a single bot first</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-blue-400 mt-0.5">•</span>
-            <span>Keep percentage values reasonable to limit risk</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-blue-400 mt-0.5">•</span>
-            <span>Enable Telegram notifications for important events</span>
-          </li>
-        </ul>
-      </div>
     </div>
   );
 }

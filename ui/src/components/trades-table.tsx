@@ -57,6 +57,19 @@ type CombinedRow = {
   short?: SideInfo;
 };
 
+const formatDetailedTimestamp = (ts?: string | null) => {
+  if (!ts) return null;
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (val: number) => val.toString().padStart(2, '0');
+  const datePart = `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
+  const timePart = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${date
+    .getMilliseconds()
+    .toString()
+    .padStart(3, '0')}`;
+  return { date: datePart, time: timePart };
+};
+
 export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live', onModeChange }: TradesTableProps) {
   const [rows, setRows] = useState<TradeRow[]>([]);
   const [fillRows, setFillRows] = useState<FillRow[]>([]);
@@ -65,6 +78,8 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
   const [isPaused, setIsPaused] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [expandedDebug, setExpandedDebug] = useState<Record<string, boolean>>({});
 
   const [symbolL, symbolE] = botId.split(':');
   const hasValidPair = Boolean(symbolL && symbolE);
@@ -320,19 +335,59 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
         <div className="text-slate-400 text-[11px] font-mono">
           <span className="text-slate-500">Status:</span> {side.status || '—'}
         </div>
-
-        <div className="text-slate-500 text-[10px] font-mono break-all">
-            <span className="text-slate-500">Payload:</span> {side.payload || '—'}
-        </div>
-        <div className="text-slate-500 text-[10px] font-mono break-all">
-            <span className="text-slate-500">Resp:</span> {side.resp || '—'}
-        </div>
-
       </div>
     );
   };
 
-  const renderInv = (label: string, inv?: string | null) => {
+  const renderDebugInfo = (side?: SideInfo, opts?: { trace?: string | null; variant: 'long' | 'short' }) => {
+    if (!side) return <div className="text-slate-500 text-xs whitespace-pre-wrap break-words">—</div>;
+
+    const makeKey = (field: 'payload' | 'resp') => `${opts?.trace || 'unknown'}:${opts?.variant || 'side'}:${field}`;
+    const toggleField = (field: 'payload' | 'resp') => {
+      const key = makeKey(field);
+      setExpandedDebug((prev) => ({
+        ...prev,
+        [key]: !prev[key],
+      }));
+    };
+    const shouldExpand = (field: 'payload' | 'resp') => expandedDebug[makeKey(field)];
+    const TRUNCATE_LIMIT = 90;
+
+    const renderField = (label: 'Payload' | 'Resp', field: 'payload' | 'resp', value?: string | null) => {
+      if (!value) return (
+        <div className="text-slate-400 whitespace-pre-wrap break-words">
+          <span className="text-slate-500">{label}:</span> —
+        </div>
+      );
+      const expanded = shouldExpand(field);
+      const needsToggle = value.length > TRUNCATE_LIMIT;
+      const displayValue = !needsToggle || expanded ? value : `${value.slice(0, TRUNCATE_LIMIT)}…`;
+      return (
+        <div className="text-slate-400 whitespace-pre-wrap break-words">
+          <span className="text-slate-500">{label}:</span> {displayValue}
+          {needsToggle && (
+            <button
+              type="button"
+              className="ml-2 text-xs text-blue-400 hover:text-blue-200 underline"
+              onClick={() => toggleField(field)}
+            >
+              {expanded ? 'Show less' : 'Show full'}
+            </button>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <div className="space-y-1 text-[11px] font-mono">
+        {renderField('Payload', 'payload', side.payload)}
+        {renderField('Resp', 'resp', side.resp)}
+      </div>
+    );
+  };
+
+  const renderInv = (label: string, inv?: string | null, opts?: { showHeading?: boolean }) => {
+    const showHeading = opts?.showHeading !== false;
     if (!inv) return null;
 
     const fmtDelta = (l?: { qty?: number | null; price?: number | null }, e?: { qty?: number | null; price?: number | null }) => {
@@ -370,7 +425,7 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
 
     return (
       <div className="space-y-1">
-        <div className="text-slate-300 text-xs font-semibold">{label}</div>
+        {showHeading && <div className="text-slate-300 text-xs font-semibold">{label}</div>}
         {lines.map((p, idx) => (
           <div key={idx} className="text-slate-400 text-[11px] font-mono">{p}</div>
         ))}
@@ -379,114 +434,147 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
   };
 
   return (
-    <div>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-        <div className="space-y-1">
-          <p className="text-slate-200 text-sm font-semibold">Trades · {symbolL}/{symbolE}</p>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="px-2 py-1 rounded-md bg-slate-800/70 border border-slate-700/70">
-              {loading
-                ? 'Loading...'
-                : error
-                ? 'Error'
-                : lastUpdated
-                ? `Updated ${lastUpdated}`
-                : 'Waiting for data'}
-            </span>
-            <span className="px-2 py-1 rounded-md bg-slate-800/50 border border-slate-700/70">Rows: {tradeCount}</span>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsPaused((p) => !p)}
-              className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
-            >
-              {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-              {isPaused ? 'Resume' : 'Pause'}
-            </button>
-            <button
-              onClick={() => fetchTrades(true)}
-              className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
-              disabled={loading}
-            >
-              <RefreshCcw className="w-4 h-4" />
-              {loading ? 'Refreshing...' : 'Refresh'}
-            </button>
-            <div className="flex bg-slate-900/70 rounded-lg overflow-hidden border border-slate-700/70">
-              {(['live', 'test'] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => onModeChange && onModeChange(m)}
-                  className={`px-3 py-2 text-xs uppercase tracking-wide transition-all ${
-                    mode === m
-                      ? 'bg-blue-600 text-white shadow-inner shadow-blue-500/30'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+    <div className="flex flex-col flex-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-[10px] sm:text-xs">
+        <span className="h-7 px-2 inline-flex items-center rounded-md bg-slate-900/70 border border-slate-800/70 text-slate-200">
+          {loading ? 'Loading...' : error ? 'Error' : lastUpdated || '—'}
+        </span>
+        <span className="h-7 px-2 inline-flex items-center rounded-md bg-slate-900/70 border border-slate-800/70 text-slate-200">
+          Rows: {tradeCount}
+        </span>
+        <button
+          onClick={() => setIsPaused((p) => !p)}
+          className="h-7 px-2 inline-flex items-center gap-1 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-md transition-all border border-slate-700/50"
+          title={isPaused ? 'Resume updates' : 'Pause updates'}
+        >
+          {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+          <span className="hidden sm:inline">{isPaused ? 'Resume' : 'Pause'}</span>
+        </button>
+        <button
+          onClick={() => fetchTrades(true)}
+          className="h-7 px-2 inline-flex items-center gap-1 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-md transition-all border border-slate-700/50"
+          disabled={loading}
+          title="Refresh now"
+        >
+          <RefreshCcw className="w-4 h-4" />
+          <span className="hidden sm:inline">{loading ? 'Refreshing...' : 'Refresh'}</span>
+        </button>
+        <button
+          onClick={() => onModeChange && onModeChange(mode === 'live' ? 'test' : 'live')}
+          className="h-7 px-2 inline-flex items-center bg-slate-900/70 border border-slate-700/70 rounded-md text-slate-200 uppercase text-[11px]"
+          title="Toggle data source"
+        >
+          {mode === 'live' ? 'Live' : 'Test'}
+        </button>
+        <button
+          onClick={() => setShowDebug((prev) => !prev)}
+          aria-pressed={showDebug}
+          className={`h-7 px-2 inline-flex items-center uppercase tracking-wide rounded-md transition ${
+            showDebug
+              ? 'bg-blue-600 text-white border border-blue-500/60 shadow-blue-500/30'
+              : 'border border-slate-700/60 bg-slate-900/60 text-slate-300 hover:text-white hover:border-slate-600/80'
+          }`}
+        >
+          Debug
+        </button>
       </div>
 
-      <div className="bg-slate-950/80 backdrop-blur-sm border border-slate-800/50 rounded-xl overflow-hidden shadow-inner">
-        <div className="overflow-x-auto">
-          <table className="w-full table-mono">
-            <thead className="bg-slate-900/80 border-b border-slate-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Time</th>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Trace</th>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Reason</th>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Inv Before / After</th>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Long Side</th>
-                <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap">Short Side</th>
-              </tr>
-            </thead>
-            <tbody>
-              {error ? (
-                <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-red-400 text-sm">
-                    {error}
-                  </td>
-                </tr>
-              ) : !combinedRows.length && !loading ? (
-                <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-slate-500 text-sm">
-                    No trades recorded yet
-                  </td>
-                </tr>
-              ) : (
-                combinedRows.map((row, rowIdx) => (
-                  <tr key={rowIdx} className="border-b border-slate-800/30 hover:bg-slate-800/20 transition-all">
-                    <td className="px-4 py-3 text-slate-200 text-xs font-mono whitespace-nowrap">
-                      {row.ts ? new Date(row.ts).toLocaleTimeString() : '—'}
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 text-[11px] font-mono whitespace-nowrap">
-                      {row.trace ? row.trace.slice(0, 8) : '—'}
-                    </td>
-                    <td className="px-4 py-3 text-slate-200 text-xs whitespace-nowrap">
-                      <div className="text-[11px] text-slate-200 font-mono space-y-1">
-                        <div className="text-slate-300">{row.direction ? row.direction.toUpperCase() : '—'}</div>
-                        <div className="text-slate-400">{row.reason || '—'}</div>
-                        <div className="text-slate-500">Δ : {row.spread == null ? '—' : `${fmt(row.spread, 2)}%`}</div>
+      <div className="bg-slate-950/80 backdrop-blur-sm border border-slate-800/50 rounded-xl overflow-hidden shadow-inner flex-1 flex flex-col min-h-0">
+        <div className="overflow-x-auto flex-1 min-h-0">
+          <div className="overflow-y-auto max-h-[calc(100vh-320px)]">
+            {(() => {
+              const columnWidth = `${100 / (showDebug ? 7 : 5)}%`;
+              const minWidth = showDebug ? '1200px' : '900px';
+              return (
+                <table className="w-full table-fixed table-mono" style={{ minWidth }}>
+                  <thead className="bg-slate-900/80 border-b border-slate-800/50 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Key</th>
+                      <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Inv Before</th>
+                      <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Inv After</th>
+                      <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Long Side</th>
+                      {showDebug && (
+                        <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Long Debug</th>
+                      )}
+                      <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Short Side</th>
+                      {showDebug && (
+                        <th className="px-4 py-3 text-left text-slate-400 text-xs uppercase tracking-wider whitespace-nowrap" style={{ width: columnWidth }}>Short Debug</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {error ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center text-red-400 text-sm">
+                          {error}
+                        </td>
+                      </tr>
+                    ) : !combinedRows.length && !loading ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center text-slate-500 text-sm">
+                          No trades recorded yet
+                        </td>
+                      </tr>
+                    ) : (
+                      combinedRows.map((row, rowIdx) => (
+                        <tr
+                          key={rowIdx}
+                          className={`border-b border-slate-800/30 hover:bg-slate-800/20 transition-all ${
+                            rowIdx % 2 === 0 ? "bg-slate-900/40" : ""
+                          }`}
+                        >
+                          <td className="px-4 py-3 text-slate-200 text-xs align-top" style={{ width: columnWidth }}>
+                      <div className="space-y-1 font-mono">
+                        {(() => {
+                          const ts = formatDetailedTimestamp(row.ts);
+                          if (!ts) {
+                            return <div className="text-slate-500">—</div>;
+                          }
+                          return (
+                            <>
+                              <div className="text-slate-500">{ts.date}</div>
+                              <div className="text-white">{ts.time}</div>
+                            </>
+                          );
+                        })()}
+                        <div className="text-white">{row.trace ? row.trace.slice(0, 12) : '—'}</div>
+                        <div className="text-[11px] text-slate-200 space-y-1">
+                          <div className="text-slate-300">{row.direction ? row.direction.toUpperCase() : '—'}</div>
+                          <div className="text-slate-400">{row.reason || '—'}</div>
+                          <div className="text-slate-500">Δ : {row.spread == null ? '—' : `${fmt(row.spread, 2)}%`}</div>
+                        </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 align-top">
-                      <div className="space-y-2">
-                        {renderInv("Before", row.inv_before_str)}
-                        {renderInv("After", row.inv_after_str)}
-                      </div>
+                    <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>
+                      {renderInv("Before", row.inv_before_str, { showHeading: false }) || (
+                        <div className="text-slate-500 text-[11px] font-mono">—</div>
+                      )}
                     </td>
-                    <td className="px-4 py-3 align-top">{renderSide('Long', row.long)}</td>
-                    <td className="px-4 py-3 align-top">{renderSide('Short', row.short)}</td>
+                    <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>
+                      {renderInv("After", row.inv_after_str, { showHeading: false }) || (
+                        <div className="text-slate-500 text-[11px] font-mono">—</div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>{renderSide('Long', row.long)}</td>
+                    {showDebug && (
+                      <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>
+                        {renderDebugInfo(row.long, { trace: row.trace, variant: 'long' })}
+                      </td>
+                    )}
+                    <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>{renderSide('Short', row.short)}</td>
+                    {showDebug && (
+                      <td className="px-4 py-3 align-top" style={{ width: columnWidth }}>
+                        {renderDebugInfo(row.short, { trace: row.trace, variant: 'short' })}
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
-            </tbody>
-          </table>
+                  </tbody>
+                </table>
+              );
+            })()}
+          </div>
         </div>
       </div>
 

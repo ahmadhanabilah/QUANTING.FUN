@@ -6,6 +6,7 @@ import { BotDetailView } from "./components/bot-detail-view";
 import { SettingsPanel } from "./components/settings-panel";
 import type { DetailTab } from "./components/bot-detail-view";
 import { LoginPage } from "./components/login-page";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -396,19 +397,11 @@ export default function App() {
   ];
   const serverStatusSummary = useMemo(() => {
     if (!serverStatus) return null;
-    const loadText = Array.isArray(serverStatus.load)
-      ? serverStatus.load.slice(0, 3).map((val) => val.toFixed(2)).join(", ")
-      : "";
+    const cpuCapacity = serverStatus.cpu?.count ? `${serverStatus.cpu.count} cores` : "—";
     return {
-      cpu: `${Math.round(serverStatus.cpu.percent)}%`,
-      memory: `${formatBytesShort(serverStatus.memory.used)} / ${formatBytesShort(serverStatus.memory.total)} (${Math.round(
-        serverStatus.memory.percent
-      )}%)`,
-      disk: `${formatBytesShort(serverStatus.disk.used)} / ${formatBytesShort(serverStatus.disk.total)} (${Math.round(
-        serverStatus.disk.percent
-      )}%)`,
-      load: loadText,
-      uptime: formatDurationShort(serverStatus.uptime),
+      cpu: { percent: Math.round(serverStatus.cpu.percent), capacity: cpuCapacity },
+      memory: { percent: Math.round(serverStatus.memory.percent), capacity: formatBytesShort(serverStatus.memory.total) },
+      disk: { percent: Math.round(serverStatus.disk.percent), capacity: formatBytesShort(serverStatus.disk.total) },
     };
   }, [serverStatus]);
 
@@ -480,6 +473,56 @@ export default function App() {
       setMsg(action === "start" ? "Bot started" : "Bot stopped");
     } catch {
       setMsg(`Failed to ${action}`);
+    }
+  }
+
+  async function removeBot(pair: SymbolCfg) {
+    if (!window.confirm(`Delete ${pair.SYMBOL_LIGHTER}/${pair.SYMBOL_EXTENDED}?`)) {
+      return;
+    }
+    try {
+      const cfgRes = await fetch(`${API_BASE}/api/config`, { headers: authHeaders });
+      if (!cfgRes.ok) {
+        setMsg("Failed to load config");
+        return;
+      }
+      const cfg = await cfgRes.json();
+      const currentSymbols: SymbolCfg[] = Array.isArray(cfg?.symbols) ? cfg.symbols : [];
+      const nextSymbols = currentSymbols.filter(
+        (sym) =>
+          !(
+            sym.SYMBOL_LIGHTER === pair.SYMBOL_LIGHTER && sym.SYMBOL_EXTENDED === pair.SYMBOL_EXTENDED
+          )
+      );
+      if (nextSymbols.length === currentSymbols.length) {
+        setMsg("Bot not found in config");
+        return;
+      }
+      const updatedConfig = { ...cfg, symbols: nextSymbols };
+      const res = await fetch(`${API_BASE}/api/config`, {
+        method: "PUT",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify(updatedConfig),
+      });
+      if (!res.ok) {
+        setMsg("Failed to delete bot");
+        return;
+      }
+      setSymbols(nextSymbols);
+      setPinnedBots((prev) => {
+        const next = { ...prev };
+        delete next[`${pair.SYMBOL_LIGHTER}:${pair.SYMBOL_EXTENDED}`];
+        return next;
+      });
+      if (selectedPair && selectedPair.L === pair.SYMBOL_LIGHTER && selectedPair.E === pair.SYMBOL_EXTENDED) {
+        setSelectedPair(null);
+        localStorage.removeItem("selectedPair");
+        localStorage.removeItem("selectedTab");
+      }
+      await loadConfig();
+      setMsg("Bot deleted");
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Failed to delete bot");
     }
   }
 
@@ -583,7 +626,8 @@ export default function App() {
         const parsed = JSON.parse(storedPair);
         if (parsed?.L && parsed?.E) {
           setSelectedPair({ L: parsed.L, E: parsed.E });
-          if (storedTab && ["logs", "trades", "settings"].includes(storedTab)) {
+          const allowedDetailTabs: DetailTab[] = ["dashboard", "decisions", "trades", "settings"];
+          if (storedTab && allowedDetailTabs.includes(storedTab)) {
             setInitialDetailTab(storedTab);
           }
         }
@@ -853,13 +897,13 @@ export default function App() {
 
   const selected = selectedPair ? bots.find((p) => p.L === selectedPair.L && p.E === selectedPair.E) || null : null;
   const headerTitle = selected ? selected.L || selected.name : "QUANTING.FUN";
-  const headerSubtitle = selected ? selected.E || selected.pair : "Manage and monitor your arbitrage bots";
+  const headerSubtitle = selected ? selected.E || selected.pair : "";
 
   return (
     <>
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
       <header className="bg-slate-900/80 backdrop-blur-xl border-b border-slate-800/50 sticky top-0 z-10">
-        <div className="px-4 sm:px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div className="px-4 sm:px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 relative">
           <div className="flex items-center gap-3">
             {selected && (
               <button
@@ -871,108 +915,94 @@ export default function App() {
                 <ArrowLeft className="w-5 h-5" />
               </button>
             )}
-              <div>
-                <h1 className="text-white text-xl font-semibold">
-                {headerTitle}
-                </h1>
-                <p className="text-slate-400 text-sm mt-1">
-                {headerSubtitle}
-                </p>
-              </div>
-            </div>
-          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-3 w-full md:w-auto">
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-4 py-3 text-center sm:text-left">
-              <p className="text-slate-400 text-xs mb-0.5">Active Bots</p>
-              <p className="text-white text-xl">
-                {activeBots}
-                <span className="text-slate-500">/{bots.length}</span>
-              </p>
-            </div>
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-4 py-3 min-w-[220px]">
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-slate-400 text-xs">Server health</p>
-                {serverStatus && (
-                  <span className="text-[11px] text-slate-500">{new Date(serverStatus.timestamp * 1000).toLocaleTimeString()}</span>
-                )}
-              </div>
-              {serverStatusSummary ? (
-                <div className="text-xs text-slate-200 grid grid-cols-2 gap-x-4 gap-y-1">
-                  <span className="text-slate-400">CPU</span>
-                  <span className="text-right text-white">{serverStatusSummary.cpu}</span>
-                  <span className="text-slate-400">Memory</span>
-                  <span className="text-right text-white">{serverStatusSummary.memory}</span>
-                  <span className="text-slate-400">Disk</span>
-                  <span className="text-right text-white">{serverStatusSummary.disk}</span>
-                  {serverStatusSummary.load && (
-                    <>
-                      <span className="text-slate-400">Load</span>
-                      <span className="text-right text-white">{serverStatusSummary.load}</span>
-                    </>
-                  )}
-                  <span className="text-slate-400">Uptime</span>
-                  <span className="text-right text-white">{serverStatusSummary.uptime}</span>
-                </div>
-              ) : (
-                <p className="text-slate-500 text-sm">{serverStatusError || "Loading..."}</p>
-              )}
-            </div>
-            <div className="flex justify-end sm:justify-start md:justify-end col-span-2 sm:col-auto">
-              <button
-                onClick={logout}
-                className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto justify-center text-slate-200 hover:text-white rounded-lg border border-slate-800/60 bg-slate-900/50 hover:bg-slate-800/50 transition-all text-sm"
-              >
-                <LogOut className="w-4 h-4" />
-                Logout
-              </button>
+            <div>
+              <h1 className="text-white text-2xl font-semibold">{headerTitle}</h1>
+              {headerSubtitle && <p className="text-slate-400 text-sm mt-1">{headerSubtitle}</p>}
             </div>
           </div>
+          {!selected && (
+            <div className="flex flex-col gap-3 w-full">
+              <div className="md:flex md:items-center md:gap-6">
+                <div className="w-full md:flex-none md:order-2 md:ml-auto md:w-auto">
+                  <div className="w-full md:w-auto md:min-w-[360px]">
+                    <div className="grid grid-cols-4 gap-1.5 w-full">
+                      <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 text-center sm:text-left h-[90px] min-h-[90px] flex flex-col justify-center min-w-0">
+                        <p className="text-slate-400 text-[9px] md:text-xs mb-0.5">Active Bots</p>
+                        <p className="text-white text-sm md:text-base">
+                          {activeBots}
+                          <span className="text-slate-500">/{bots.length}</span>
+                        </p>
+                      </div>
+                      {(["cpu", "memory", "disk"] as Array<keyof typeof serverMetricLabels>).map((metric) => {
+                        const summary = serverStatusSummary?.[metric];
+                        return (
+                          <div
+                            key={metric}
+                            className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 h-[90px] min-h-[90px] flex flex-col justify-center min-w-0"
+                          >
+                            <p className="text-slate-400 text-[9px] md:text-xs mb-0.5 text-center sm:text-left">{serverMetricLabels[metric]}</p>
+                            {summary ? (
+                              <>
+                                <p className="text-white text-sm md:text-base text-center sm:text-left">{summary.percent}%</p>
+                                <p className="text-slate-500 text-[9px] md:text-[11px] text-center sm:text-left">of {summary.capacity}</p>
+                              </>
+                            ) : (
+                              <p className="text-slate-500 text-[11px] text-center sm:text-left">{serverStatusError || "Loading..."}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 w-full md:w-auto md:flex-1 md:order-1 md:justify-center md:ml-0 mt-4 md:mt-0 md:absolute md:left-1/2 md:-translate-x-1/2 md:top-1/2 md:-translate-y-1/2 md:w-auto">
+                  <button
+                    onClick={() => setActiveTab("dashboard")}
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${
+                      activeTab === "dashboard"
+                        ? "border-blue-500 text-white bg-blue-600/40"
+                        : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                    }`}
+                  >
+                    <Activity className="w-4 h-4" />
+                    <span>Dashboard</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("settings")}
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${
+                      activeTab === "settings"
+                        ? "border-blue-500 text-white bg-blue-600/40"
+                        : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                    }`}
+                  >
+                    <SettingsIcon className="w-4 h-4" />
+                    <span>Settings</span>
+                  </button>
+                  <button
+                    onClick={logout}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border border-slate-700 text-slate-200 bg-slate-900/50 hover:bg-slate-800/50 transition-all"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span className="hidden sm:inline">Logout</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </header>
-
-      {!selected && (
-        <div className="bg-slate-900/30 backdrop-blur-sm border-b border-slate-800/50">
-          <div className="px-4 sm:px-6">
-            <nav className="flex flex-wrap gap-2 items-center">
-              <button
-                onClick={() => setActiveTab("dashboard")}
-                className={`flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-3 rounded-lg border-2 transition-all ${
-                  activeTab === "dashboard"
-                    ? "border-blue-500 text-white bg-blue-500/10"
-                    : "border-transparent text-slate-400 hover:text-slate-300 hover:bg-slate-800/30"
-                }`}
-              >
-                <Activity className="w-4 h-4" />
-                Dashboard
-              </button>
-              <button
-                onClick={() => setActiveTab("settings")}
-                className={`flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-3 rounded-lg border-2 transition-all ${
-                  activeTab === "settings"
-                    ? "border-blue-500 text-white bg-blue-500/10"
-                    : "border-transparent text-slate-400 hover:text-slate-300 hover:bg-slate-800/30"
-                }`}
-              >
-                <SettingsIcon className="w-4 h-4" />
-                Settings
-              </button>
-              <div className="flex-1" />
-            </nav>
-          </div>
-        </div>
-      )}
 
       <main className="p-6">
         <div className="max-w-7xl mx-auto space-y-6">
           {!selected && activeTab === "dashboard" && (
             <div>
               <div className="mb-6 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex-1 min-w-[140px]">
                     <h2 className="text-white mb-1 text-lg">Active Bots</h2>
-                    <p className="text-slate-400 text-sm">Pin, start/stop, and monitor your running pairs</p>
                   </div>
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
-                    <div className="relative w-full sm:w-64">
+                  <div className="flex flex-1 min-w-[200px] items-center gap-2">
+                    <div className="relative flex-1 min-w-[160px]">
                       <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         value={searchTerm}
@@ -981,130 +1011,141 @@ export default function App() {
                         className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-900/70 border border-slate-700 text-sm text-white focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/40 transition"
                       />
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleCreateBot}
-                      disabled={createSaving}
-                      className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition shadow-lg shadow-blue-500/30 disabled:opacity-60 w-full sm:w-auto"
-                    >
-                      <Plus className="w-4 h-4" />
-                      {createSaving ? "Creating..." : "New bot"}
-                    </button>
-                    <Dialog open={bulkOpen} onOpenChange={handleBulkDialogChange}>
-                      <DialogTrigger asChild>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
                         <button
                           type="button"
-                          className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-slate-700 text-sm text-slate-200 hover:text-white hover:bg-slate-800/70 transition w-full sm:w-auto"
+                          className="flex items-center justify-center px-3 py-2 rounded-lg border border-slate-700 text-slate-200 hover:text-white hover:bg-slate-800/70 transition"
+                          aria-label="Add bot"
                         >
                           <Plus className="w-4 h-4" />
-                          Bulk add
                         </button>
-                      </DialogTrigger>
-                      <DialogContent className="max-w-3xl">
-                        <DialogHeader>
-                          <DialogTitle>Bulk add bots</DialogTitle>
-                          <DialogDescription>
-                            Paste JSON (array of configs) or write one pair per line as
-                            <code className="px-1">SYMBOL_LIGHTER SYMBOL_EXTENDED [MIN_SPREAD] [SPREAD_TP] [MIN_HITS]</code>. The preview
-                            highlights duplicates, conflicts, and invalid rows before you submit.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <div className="space-y-4">
-                          <div className="space-y-3">
-                            <textarea
-                              value={bulkInput}
-                              onChange={(e) => setBulkInput(e.target.value)}
-                              rows={10}
-                              className="w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[240px]"
-                              placeholder={`Paste JSON array or one pair per line:\nBTC BTC-USD 0.3 0.2 1\nETH ETH-USD`}
-                            />
-                            {bulkError && <p className="text-sm text-red-400">{bulkError}</p>}
-                            {bulkSummary && (
-                              <pre className="whitespace-pre-wrap rounded-md bg-slate-800/60 p-3 text-xs text-slate-200 border border-slate-700">
-                                {bulkSummary}
-                              </pre>
-                            )}
-                          </div>
-                          <div className="space-y-3">
-                            <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                <div>
-                                  <p className="text-sm text-white">Live preview</p>
-                                  <p className="text-xs text-slate-400">Entries ready to import or needing attention.</p>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                  {bulkStatChips.map((chip) => (
-                                    <span
-                                      key={chip.label}
-                                      className={`text-xs px-2 py-1 rounded-full border ${chip.className} ${
-                                        chip.value ? "opacity-100" : "opacity-50"
-                                      }`}
-                                    >
-                                      {chip.label}: {chip.value}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                              <div className="mt-3 max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 divide-y divide-slate-800/70">
-                                {bulkPreview.entryPreviews.length ? (
-                                  bulkPreview.entryPreviews.map((entry) => (
-                                    <div key={`${entry.label}-${entry.pairLabel}`} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-center sm:justify-between">
-                                      <div>
-                                        <p className="text-sm text-white">
-                                          <span className="font-mono text-xs text-slate-400 mr-2">{entry.label}</span>
-                                          {entry.pairLabel}
-                                        </p>
-                                        {entry.detail && <p className="text-xs text-slate-400">{entry.detail}</p>}
-                                      </div>
-                                      <span
-                                        className={`text-xs px-2 py-1 rounded-full border ${BULK_STATUS_STYLES[entry.status].className}`}
-                                      >
-                                        {BULK_STATUS_STYLES[entry.status].label}
-                                      </span>
-                                    </div>
-                                  ))
-                                ) : (
-                                  <div className="p-4 text-sm text-slate-400">Paste entries to see them analyzed here.</div>
-                                )}
-                              </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-40 bg-slate-900 border border-slate-700 text-slate-100">
+                        <DropdownMenuItem
+                          className="text-sm cursor-pointer hover:bg-slate-800/80 hover:text-white transition-colors"
+                          onSelect={() => {
+                            handleCreateBot();
+                          }}
+                        >
+                          Single add
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-sm cursor-pointer hover:bg-slate-800/80 hover:text-white transition-colors"
+                          onSelect={() => {
+                            setBulkOpen(true);
+                          }}
+                        >
+                          Bulk add
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+                <Dialog open={bulkOpen} onOpenChange={handleBulkDialogChange}>
+                  <DialogContent className="max-w-3xl">
+                    <DialogHeader>
+                      <DialogTitle>Bulk add bots</DialogTitle>
+                      <DialogDescription>
+                        Paste JSON (array of configs) or write one pair per line as
+                        <code className="px-1">SYMBOL_LIGHTER SYMBOL_EXTENDED [MIN_SPREAD] [SPREAD_TP] [MIN_HITS]</code>. The preview
+                        highlights duplicates, conflicts, and invalid rows before you submit.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      <div className="space-y-3">
+                        <textarea
+                          value={bulkInput}
+                          onChange={(e) => setBulkInput(e.target.value)}
+                          rows={10}
+                          className="w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[240px]"
+                          placeholder={`Paste JSON array or one pair per line:\nBTC BTC-USD 0.3 0.2 1\nETH ETH-USD`}
+                        />
+                        {bulkError && <p className="text-sm text-red-400">{bulkError}</p>}
+                        {bulkSummary && (
+                          <pre className="whitespace-pre-wrap rounded-md bg-slate-800/60 p-3 text-xs text-slate-200 border border-slate-700">
+                            {bulkSummary}
+                          </pre>
+                        )}
+                      </div>
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                              <p className="text-sm text-white">Live preview</p>
+                              <p className="text-xs text-slate-400">Entries ready to import or needing attention.</p>
                             </div>
-                            {bulkPreview.parseWarnings.length > 0 && (
-                              <div className="rounded-lg border border-amber-500/40 bg-slate-900 p-3">
-                                <p className="text-sm font-semibold text-amber-100">Parse warnings</p>
-                                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-100">
-                                  {bulkPreview.parseWarnings.map((warning, idx) => (
-                                    <li key={`${warning}-${idx}`}>{warning}</li>
-                                  ))}
-                                </ul>
-                              </div>
+                            <div className="flex flex-wrap gap-2">
+                              {bulkStatChips.map((chip) => (
+                                <span
+                                  key={chip.label}
+                                  className={`text-xs px-2 py-1 rounded-full border ${chip.className} ${
+                                    chip.value ? "opacity-100" : "opacity-50"
+                                  }`}
+                                >
+                                  {chip.label}: {chip.value}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="mt-3 max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 divide-y divide-slate-800/70">
+                            {bulkPreview.entryPreviews.length ? (
+                              bulkPreview.entryPreviews.map((entry) => (
+                                <div key={`${entry.label}-${entry.pairLabel}`} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-center sm:justify-between">
+                                  <div>
+                                    <p className="text-sm text-white">
+                                      <span className="font-mono text-xs text-slate-400 mr-2">{entry.label}</span>
+                                      {entry.pairLabel}
+                                    </p>
+                                    {entry.detail && <p className="text-xs text-slate-400">{entry.detail}</p>}
+                                  </div>
+                                  <span
+                                    className={`text-xs px-2 py-1 rounded-full border ${BULK_STATUS_STYLES[entry.status].className}`}
+                                  >
+                                    {BULK_STATUS_STYLES[entry.status].label}
+                                  </span>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="p-4 text-sm text-slate-400">Paste entries to see them analyzed here.</div>
                             )}
                           </div>
                         </div>
-                        <DialogFooter>
-                          <button
-                            type="button"
-                            onClick={() => handleBulkDialogChange(false)}
-                            className="px-4 py-2 rounded-lg border border-slate-700 text-slate-200 hover:text-white hover:bg-slate-800/60 transition text-sm"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleBulkCreate}
-                            disabled={bulkSaving}
-                            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition disabled:opacity-60"
-                          >
-                            {bulkSaving ? "Adding..." : "Add bots"}
-                          </button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-                  </div>
-                </div>
+                        {bulkPreview.parseWarnings.length > 0 && (
+                          <div className="rounded-lg border border-amber-500/40 bg-slate-900 p-3">
+                            <p className="text-sm font-semibold text-amber-100">Parse warnings</p>
+                            <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-100">
+                              {bulkPreview.parseWarnings.map((warning, idx) => (
+                                <li key={`${warning}-${idx}`}>{warning}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <button
+                        type="button"
+                        onClick={() => handleBulkDialogChange(false)}
+                        className="px-4 py-2 rounded-lg border border-slate-700 text-slate-200 hover:text-white hover:bg-slate-800/60 transition text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleBulkCreate}
+                        disabled={bulkSaving}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition disabled:opacity-60"
+                      >
+                        {bulkSaving ? "Adding..." : "Add bots"}
+                      </button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {pinnedList.length > 0 && (
-                  <div className="md:col-span-2 text-xs uppercase tracking-wide text-slate-400 flex items-center gap-2">
+                  <div className="col-span-full text-xs uppercase tracking-wide text-slate-400 flex items-center gap-2">
                     <span className="h-px w-6 bg-slate-700" />
                     Pinned
                     <span className="h-px flex-1 bg-slate-700" />
@@ -1129,14 +1170,14 @@ export default function App() {
                     onView={() => {
                       setSelectedPair({ L: bot.L, E: bot.E });
                       localStorage.setItem("selectedPair", JSON.stringify({ L: bot.L, E: bot.E }));
-                      localStorage.setItem("selectedTab", "decisions");
-                      setInitialDetailTab("decisions");
+                      localStorage.setItem("selectedTab", "dashboard");
+                      setInitialDetailTab("dashboard");
                     }}
                   />
                 ))}
-                {pinnedList.length > 0 && <div className="md:col-span-2 h-px bg-slate-800/60" />}
+                {pinnedList.length > 0 && <div className="col-span-full h-px bg-slate-800/60" />}
                 {pinnedList.length > 0 && unpinnedList.length > 0 && (
-                  <div className="md:col-span-2 text-xs uppercase tracking-wide text-slate-400 flex items-center gap-2">
+                  <div className="col-span-full text-xs uppercase tracking-wide text-slate-400 flex items-center gap-2">
                     <span className="h-px w-6 bg-slate-700" />
                     Other Bots
                     <span className="h-px flex-1 bg-slate-700" />
@@ -1161,8 +1202,8 @@ export default function App() {
                     onView={() => {
                       setSelectedPair({ L: bot.L, E: bot.E });
                       localStorage.setItem("selectedPair", JSON.stringify({ L: bot.L, E: bot.E }));
-                      localStorage.setItem("selectedTab", "decisions");
-                      setInitialDetailTab("decisions");
+                      localStorage.setItem("selectedTab", "dashboard");
+                      setInitialDetailTab("dashboard");
                     }}
                   />
                 ))}
@@ -1189,7 +1230,8 @@ export default function App() {
         mode={dataMode}
         onModeChange={setDataMode}
         onToggle={() => startStop(selected.cfg, selected.status === "running" ? "stop" : "start")}
-        initialTab={initialDetailTab || "decisions"}
+        onDelete={() => removeBot(selected.cfg)}
+        initialTab={initialDetailTab || "dashboard"}
         onTabChange={(tab) => {
           localStorage.setItem("selectedTab", tab);
         }}
@@ -1230,3 +1272,4 @@ export default function App() {
     </>
   );
 }
+const serverMetricLabels = { cpu: "CPU", memory: "Memory", disk: "Disk" } as const;

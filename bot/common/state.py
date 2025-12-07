@@ -5,6 +5,9 @@ class State:
         self.invE = 0.0
         self.entry_price_L = 0.0
         self.entry_price_E = 0.0
+        # mirror of inventory but tracking the last known entry/position price per venue
+        self.priceInvL = 0.0
+        self.priceInvE = 0.0
         # unhedged maker deltas (tracked by HedgeBot)
         self.unhedged_L = 0.0
         self.unhedged_E = 0.0

@@ -15,7 +15,7 @@ from x10.perpetual.stream_client import PerpetualStreamClient
 from x10.perpetual.trading_client import PerpetualTradingClient
 
 logger = logging.getLogger("EXT")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.INFO)
 
 
 class ExtendedWS:
@@ -38,6 +38,10 @@ class ExtendedWS:
         self.dedup_ob = False
         self.position_qty: float = 0.0
         self.position_entry: float = 0.0
+        self._has_account_position: bool = False
+        self._got_first_ob: bool = False
+        self._got_first_acc: bool = False
+        self._need_first_account_pos: bool = True
         self.last_fill_price: float = 0.0
         self.config = {
             "vault_id": os.getenv("EXTENDED_VAULT_ID"),
@@ -120,11 +124,16 @@ class ExtendedWS:
             return
 
         async def subscribe_orderbook():
+            got_first = False
             while True:
                 try:
+                    logger.info("Subscribing [OB]")
                     async with self._ws_client.subscribe_to_orderbooks(self.symbol, depth=1) as stream:
-                        logger.info("Subscribed [OB, Acc]")
                         async for msg in stream:
+                            if not got_first:
+                                logger.info("[GOT THE FIRST WS NOTIF - OB]")
+                                got_first = True
+                                self._got_first_ob = True
                             self._handle_orderbook(msg.data)
                 except Exception as e:
                     logger.error(f"OB stream error: {e}; reconnecting in 1s")
@@ -140,11 +149,17 @@ class ExtendedWS:
             return
 
         async def subscribe_account():
+            got_first = False
             while True:
                 try:
+                    logger.info("Subscribing [Acc]")
                     async with self._ws_client.subscribe_to_account_updates(self.config["api_key"]) as stream:
                         async for msg in stream:
-                            self._handle_account(msg.data)
+                            if not got_first:
+                                logger.info("[GOT THE FIRST WS NOTIF - Acc]")
+                                got_first = True
+                                self._got_first_acc = True
+                            self._handle_account(msg)
                 except Exception as e:
                     logger.error(f"account stream error: {e}; reconnecting in 1s")
                     await asyncio.sleep(1)
@@ -176,80 +191,174 @@ class ExtendedWS:
 
     def _handle_account(self, msg) -> None:
         try:
-            # msg is AccountStreamDataModel
-            # logger.info(msg)
-
-            # Prefer maker order fills (FILLED LIMIT post_only)
-            orders = getattr(msg, "orders", None)
-            if orders:
-                maker_qty = 0.0
-                all_qty = 0.0
-                last_price = None
-                for o in orders:
-                    try:
-                        market = str(getattr(o, "market", "") or "")
-                        filled = float(o.filled_qty or 0)
-                        side = str(o.side or "").upper()
-                        otype = str(o.type or "").upper()
-                        status = str(getattr(o, "status", "") or "").upper()
-                        if market and market.upper() != self.symbol.upper():
-                            continue
-                        if filled <= 0:
-                            continue
-                        avg_price = getattr(o, "average_price", None)
-                        if avg_price:
-                            last_price = float(avg_price)
-                        signed = filled if side == "BUY" else -filled
-                        # maker-only path for hedge (LIMIT + post_only + FILLED)
-                        if otype == "LIMIT" and status == "FILLED" and getattr(o, "post_only", False):
-                            maker_qty += signed
-                            # avoid double counting in all_qty; we add maker fills only via maker_qty
-                            continue
-                        logger.info(
-                            f"order update type={o.type} status={o.status} side={o.side} "
-                            f"qty={o.filled_qty} post_only={getattr(o,'post_only',None)} market={market}"
-                        )
-                        # all fills for inventory (any FILLED)
-                        if status == "FILLED":
-                            all_qty += signed
-                        try:
-                            px_val = float(getattr(o, "average_price", avg_price))
-                            if px_val > 0:
-                                self.last_fill_price = px_val
-                        except Exception:
-                            pass
-                    except Exception as exc:
-                        logger.debug(f"skip order parse error: {exc}")
-                        continue
-                # update position first so downstream logs see refreshed entry/qty
-                if all_qty != 0 and self._on_position_state_cb:
-                    px = last_price
-                    if px is None or px <= 0:
-                        if getattr(self, "last_fill_price", 0) > 0:
-                            px = self.last_fill_price
-                        else:
-                            px = self.ob["askPrice"] if all_qty < 0 else self.ob["bidPrice"]
-                    if px and px > 0:
-                        prev_qty = getattr(self, "position_qty", 0.0)
-                        prev_entry = getattr(self, "position_entry", 0.0)
-                        new_qty = prev_qty + all_qty
-                        if new_qty == 0:
-                            new_entry = 0.0
-                        elif prev_qty == 0 or (prev_qty > 0 > new_qty) or (prev_qty < 0 < new_qty):
-                            new_entry = px
-                        else:
-                            new_entry = (prev_qty * prev_entry + all_qty * px) / new_qty
-                        self.last_fill_price = px
-                        self.position_qty = new_qty
-                        self.position_entry = new_entry
-                        self._on_position_state_cb(new_qty, new_entry)
-                if maker_qty and self._on_account_update_cb:
-                    self._on_account_update_cb(maker_qty)
-                if all_qty and self._on_inventory_cb:
-                    self._on_inventory_cb(all_qty)
+            if msg is None:
                 return
+
+            # x10 messages can arrive either as a wrapper with .type/.data or as the data payload itself.
+            payload = getattr(msg, "data", msg)
+            msg_type = str(getattr(msg, "type", "") or "").upper()
+
+            # Pull fields from both object-style and dict-style payloads.
+            positions = getattr(payload, "positions", None)
+            orders = getattr(payload, "orders", None)
+            if positions is None and isinstance(payload, dict):
+                positions = payload.get("positions")
+            if orders is None and isinstance(payload, dict):
+                orders = payload.get("orders")
+
+            # Only treat a message as a positions update if the field is present (or type explicitly says so).
+            positions_field_seen = (
+                positions is not None
+                or (isinstance(payload, dict) and "positions" in payload)
+                or msg_type == "POSITION"
+            )
+            if positions_field_seen:
+                self._handle_positions(positions)
+
+            # Orders-only messages should not flip the position-ready flag.
+            orders_field_seen = (
+                orders is not None
+                or (isinstance(payload, dict) and "orders" in payload)
+                or msg_type == "ORDER"
+            )
+            if orders_field_seen and orders:
+                self._handle_orders(orders)
+
         except Exception as e:
             logger.error(f"[ExtendedWS:{self.symbol}] handle_account error: {e}")
+
+    def _handle_positions(self, positions) -> None:
+        """Parse account position payloads; only invoked when a positions field is present."""
+        try:
+            if positions is None:
+                return
+            def _get(obj, key, default=None):
+                if obj is None:
+                    return default
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                try:
+                    return getattr(obj, key)
+                except Exception:
+                    return default
+
+            iterable = positions.values() if isinstance(positions, dict) else positions
+            if iterable is None:
+                iterable = []
+            if not isinstance(iterable, (list, tuple)):
+                iterable = [iterable]
+
+            found_pos = False
+            for pos in iterable:
+                if pos is None:
+                    continue
+                market = str(_get(pos, "market") or _get(pos, "symbol") or "")
+                if market.upper() != self.symbol.upper():
+                    continue
+                # print(f"[POSITION NOTIF EXT] {pos}")
+                size_val = float(_get(pos, "size") or _get(pos, "position") or 0)
+                side_val = str(_get(pos, "side") or "").upper()
+                sign = -1 if side_val == "SHORT" else 1
+                qty = size_val * sign
+                entry_val = (
+                    _get(pos, "openPrice")
+                    or _get(pos, "open_price")
+                    or _get(pos, "avg_entry_price")
+                )
+                try:
+                    entry = float(entry_val) if entry_val is not None else 0.0
+                except Exception:
+                    entry = 0.0
+                if qty == 0 or entry <= 0:
+                    entry = 0.0
+                self.position_qty = qty
+                self.position_entry = entry
+                self._has_account_position = True
+                self._need_first_account_pos = False
+                if self._on_position_state_cb:
+                    self._on_position_state_cb(qty, entry)
+                found_pos = True
+
+            # If the positions field was present but empty/missing our symbol, treat as flat.
+            if not found_pos:
+                if self.position_qty != 0 or self._need_first_account_pos:
+                    self.position_qty = 0.0
+                    self.position_entry = 0.0
+                    if self._on_position_state_cb:
+                        self._on_position_state_cb(0.0, 0.0)
+                self._has_account_position = True
+                self._need_first_account_pos = False
+
+        except Exception as e:
+            logger.error(f"[ExtendedWS:{self.symbol}] handle_positions error: {e}")
+
+    def _handle_orders(self, orders) -> None:
+        """Process fills from order payloads without touching position readiness flags."""
+        try:
+            all_qty = 0.0
+            last_price = None
+            iterable = orders.values() if isinstance(orders, dict) else orders
+            if iterable is None:
+                return
+            if not isinstance(iterable, (list, tuple)):
+                iterable = [iterable]
+            def _get_val(obj, key, default=None):
+                if obj is None:
+                    return default
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                try:
+                    return getattr(obj, key)
+                except Exception:
+                    return default
+            for o in iterable:
+                if o is None:
+                    continue
+                try:
+                    market = str(_get_val(o, "market", "") or "")
+                    filled = float(_get_val(o, "filled_qty", 0) or 0)
+                    side = str(_get_val(o, "side", "") or "").upper()
+                    status = str(_get_val(o, "status", "") or "").upper()
+                    if market and market.upper() != self.symbol.upper():
+                        continue
+                    if filled <= 0:
+                        continue
+
+                    # print(f"[FILL NOTIF EXT] {o}")
+
+                    avg_price = _get_val(o, "average_price", None)
+                    if avg_price:
+                        last_price = float(avg_price)
+
+                    # all fills for inventory (any FILLED)
+                    if status == "FILLED":
+                        signed = filled if side == "BUY" else -filled
+                        all_qty += signed
+                    try:
+                        px_val = float(_get_val(o, "average_price", avg_price) or 0)
+                        if px_val > 0:
+                            self.last_fill_price = px_val
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.debug(f"skip order parse error: {exc}")
+                    continue
+
+            if all_qty != 0:
+                # keep last fill price for logging; entry comes from POSITION feed
+                px = last_price
+                if px is None or px <= 0:
+                    if getattr(self, "last_fill_price", 0) > 0:
+                        px = self.last_fill_price
+                    else:
+                        px = self.ob["askPrice"] if all_qty < 0 else self.ob["bidPrice"]
+                if px and px > 0:
+                    self.last_fill_price = px
+                if self._on_inventory_cb:
+                    self._on_inventory_cb(all_qty)
+        except Exception as e:
+            logger.error(f"[ExtendedWS:{self.symbol}] handle_orders error: {e}")
+            print(orders)
 
     # ---------- trading API ----------
 
@@ -274,6 +383,12 @@ class ExtendedWS:
             resp = await self._trading_client.account.get_positions(market_names=[self.symbol])
             positions = resp.data if resp and resp.data else []
             if not positions:
+                self.position_qty = 0.0
+                self.position_entry = 0.0
+                self._has_account_position = True
+                self._need_first_account_pos = False
+                if self._on_position_state_cb:
+                    self._on_position_state_cb(0.0, 0.0)
                 return 0.0, 0.0
             qty = 0.0
             total_value = 0.0
@@ -287,6 +402,8 @@ class ExtendedWS:
             avg_entry = total_value / abs(qty) if qty and total_value else 0.0
             self.position_qty = qty
             self.position_entry = avg_entry
+            self._has_account_position = True
+            self._need_first_account_pos = False
             if self._on_position_state_cb:
                 self._on_position_state_cb(qty, avg_entry)
             return qty, avg_entry
@@ -342,8 +459,9 @@ class ExtendedWS:
         px = self._format_price(price)
         qty = self._format_qty(size)
 
-        prep_ts = time.perf_counter()
         try:
+            logger.info(f"send_market")
+            wall_start = time.time()
             api_start = time.perf_counter()
             resp = await self._trading_client.place_order(
                 market_name=self.symbol,
@@ -354,14 +472,8 @@ class ExtendedWS:
                 reduce_only=False,
             )
             api_ms = (time.perf_counter() - api_start) * 1000
-            total_ms = (time.perf_counter() - prep_ts) * 1000
-            logger.info(
-                f"send_market payload latency_ms={api_ms:.1f} symbol={self.symbol} side={side_enum.name} "
-                f"price={px} qty={qty} resp={resp}"
-            )
-            logger.info(
-                f"send_market done total_ms={total_ms:.1f}"
-            )
+            wall_end = time.time()
+            logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
             return {
                 "payload": {"price": px, "qty": qty, "side": side_enum.name},
                 "resp": str(resp),

@@ -9,6 +9,7 @@ type DecisionRow = {
   action?: string | null;
   dir_expl?: string | null;
   spread_signal?: number | null;
+   size?: number | null;
   inv_l?: number | null;
   inv_e?: number | null;
   inv_after_l?: number | null;
@@ -31,6 +32,19 @@ type DecisionsTableProps = {
   authHeaders: Record<string, string>;
   mode: "live" | "test";
   onModeChange?: (mode: "live" | "test") => void;
+};
+
+const formatDetailedTimestamp = (ts?: string | null) => {
+  if (!ts) return null;
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return null;
+  const pad = (val: number) => val.toString().padStart(2, "0");
+  const datePart = `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
+  const timePart = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${date
+    .getMilliseconds()
+    .toString()
+    .padStart(3, "0")}`;
+  return { date: datePart, time: timePart };
 };
 
 export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange }: DecisionsTableProps) {
@@ -60,6 +74,7 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
         const list: DecisionRow[] = Array.isArray(data?.rows)
           ? data.rows.map((r: any) => ({
               ...r,
+              size: r?.size ?? null,
               dir_expl: r?.dir_expl || `${r?.direction || ''} ${r?.reason || ''}`.trim(),
             }))
           : [];
@@ -202,101 +217,102 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
     const title = row.direction ? row.direction.toUpperCase() : "—";
     const reason = row.reason || "—";
     const spread = row.spread_signal;
+    const size = row.size;
     return (
       <div className="text-[11px] text-slate-200 font-mono space-y-1">
         <div className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800/60 text-slate-200 uppercase">{title}</div>
         <div className="text-slate-300">{reason}</div>
+        <div className="text-slate-300">Size: {size === null || size === undefined ? "—" : fmt(size, 4)}</div>
         <div className="text-slate-500">Δ : {spread === null || spread === undefined ? "—" : `${fmt(spread, 2)}%`}</div>
       </div>
     );
   };
 
   return (
-    <div>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-        <div className="space-y-1">
-          <p className="text-slate-200 text-sm font-semibold">Decisions · {symbolL}/{symbolE}</p>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="px-2 py-1 rounded-md bg-slate-800/70 border border-slate-700/70">
-              {loading ? "Loading..." : error ? "Error" : lastUpdated ? `Updated ${lastUpdated}` : "Waiting for data"}
-            </span>
-            <span className="px-2 py-1 rounded-md bg-slate-800/50 border border-slate-700/70">Rows: {rows.length}</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => fetchDecisions(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-lg transition-all text-sm border border-slate-700/50"
-            disabled={loading}
-          >
-            <RefreshCcw className="w-4 h-4" />
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
-          <div className="flex bg-slate-900/70 rounded-lg overflow-hidden border border-slate-700/70">
-            {(["live", "test"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => onModeChange && onModeChange(m)}
-                className={`px-3 py-2 text-xs uppercase tracking-wide transition-all ${
-                  mode === m
-                    ? "bg-blue-600 text-white shadow-inner shadow-blue-500/30"
-                    : "text-slate-300 hover:text-white hover:bg-slate-800/60"
-                }`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-        </div>
+    <div className="flex flex-col flex-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-[10px] sm:text-xs">
+        <span className="h-7 px-2 inline-flex items-center rounded-md bg-slate-900/70 border border-slate-800/70 text-slate-200">
+          {loading ? "Loading..." : error ? "Error" : lastUpdated || "—"}
+        </span>
+        <span className="h-7 px-2 inline-flex items-center rounded-md bg-slate-900/70 border border-slate-800/70 text-slate-200">
+          Rows: {rows.length}
+        </span>
+        <button
+          onClick={() => fetchDecisions(true)}
+          className="h-7 px-2 inline-flex items-center gap-1 bg-slate-800/50 hover:bg-slate-700/50 text-white rounded-md transition-all border border-slate-700/50"
+          disabled={loading}
+          title="Refresh decisions"
+        >
+          <RefreshCcw className="w-4 h-4" />
+          <span className="hidden sm:inline">{loading ? "Refreshing..." : "Refresh"}</span>
+        </button>
+        <button
+          onClick={() => onModeChange && onModeChange(mode === "live" ? "test" : "live")}
+          className="h-7 px-2 inline-flex items-center bg-slate-900/70 border border-slate-700/70 rounded-md text-slate-200 uppercase"
+          title="Toggle data source"
+        >
+          {mode === "live" ? "Live" : "Test"}
+        </button>
       </div>
 
-      <div className="bg-slate-950/80 backdrop-blur-sm border border-slate-800/50 rounded-xl overflow-hidden shadow-inner">
+      <div className="bg-slate-950/80 backdrop-blur-sm border border-slate-800/50 rounded-xl overflow-hidden shadow-inner flex-1 flex flex-col min-h-0">
         {error ? (
           <div className="px-4 py-10 text-center text-red-400 text-sm">{error}</div>
         ) : loading ? (
           <div className="px-4 py-10 text-center text-slate-500 text-sm">Loading...</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs table-mono">
-              <thead className="bg-slate-900/80 border-b border-slate-800/50">
-                <tr>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Time</th>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Trace</th>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Dir / Reason</th>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">OB</th>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Inv Before</th>
-                  <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Inv After</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.length === 0 ? (
+          <div className="overflow-x-auto flex-1 min-h-0">
+            <div className="overflow-y-auto max-h-[calc(100vh-320px)]">
+              <table className="w-full text-xs table-mono">
+                <thead className="bg-slate-900/80 border-b border-slate-800/50 sticky top-0 z-10">
                   <tr>
-                    <td colSpan={5} className="px-3 py-6 text-center text-slate-500">
-                      No decisions logged yet
-                    </td>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Time</th>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Trace</th>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Dir / Reason</th>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">OB</th>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Inv Before</th>
+                    <th className="px-3 py-2 text-left text-slate-400 uppercase tracking-wider whitespace-nowrap">Inv After</th>
                   </tr>
-                ) : (
-                  rows.map((row, idx) => (
-                    <tr key={(row.trace_id || row.ts || idx).toString()} className={`border-b border-slate-800/40 hover:bg-slate-800/30 transition-colors ${idx % 2 === 0 ? "bg-slate-900/40" : ""}`}>
-                      <td className="px-3 py-2 text-slate-200 font-mono whitespace-nowrap">
-                        {row.ts ? new Date(row.ts).toLocaleTimeString() : "—"}
-                      </td>
-                      <td className="px-3 py-2 text-slate-400 text-[11px] font-mono whitespace-nowrap">
-                        {row.trace_id ? row.trace_id.slice(0, 8) : "—"}
-                      </td>
-                      <td className="px-3 py-2">{renderDirReason(row)}</td>
-                      <td className="px-3 py-2">{renderOb(row)}</td>
-                      <td className="px-3 py-2">
-                        {renderInvBlock(row.inv_before_str || `${fmt(row.inv_l, 4)}/${fmt(row.inv_e, 4)}`, row.reason, row.spread_signal)}
-                      </td>
-                      <td className="px-3 py-2">
-                        {renderInvBlock(row.inv_after_str || `${fmt(row.inv_after_l, 4)}/${fmt(row.inv_after_e, 4)}`, row.reason, row.spread_signal)}
+                </thead>
+                <tbody>
+                  {rows.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-6 text-center text-slate-500">
+                        No decisions logged yet
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    rows.map((row, idx) => (
+                      <tr key={(row.trace_id || row.ts || idx).toString()} className={`border-b border-slate-800/40 hover:bg-slate-800/30 transition-colors ${idx % 2 === 0 ? "bg-slate-900/40" : ""}`}>
+                        <td className="px-3 py-2 text-slate-200 font-mono whitespace-nowrap">
+                          {(() => {
+                            const ts = formatDetailedTimestamp(row.ts);
+                            if (!ts) return "—";
+                            return (
+                              <div className="text-[11px] space-y-0.5">
+                                <div>{ts.date}</div>
+                                <div className="text-slate-400">{ts.time}</div>
+                              </div>
+                            );
+                          })()}
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 text-[11px] font-mono whitespace-nowrap">
+                          {row.trace_id ? row.trace_id.slice(0, 8) : "—"}
+                        </td>
+                        <td className="px-3 py-2">{renderDirReason(row)}</td>
+                        <td className="px-3 py-2">{renderOb(row)}</td>
+                        <td className="px-3 py-2">
+                          {renderInvBlock(row.inv_before_str || `${fmt(row.inv_l, 4)}/${fmt(row.inv_e, 4)}`, row.reason, row.spread_signal)}
+                        </td>
+                        <td className="px-3 py-2">
+                          {renderInvBlock(row.inv_after_str || `${fmt(row.inv_after_l, 4)}/${fmt(row.inv_after_e, 4)}`, row.reason, row.spread_signal)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>

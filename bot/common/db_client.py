@@ -78,6 +78,7 @@ class DBClient:
             alter table decisions add column if not exists reason text;
             alter table decisions add column if not exists direction text;
             alter table decisions add column if not exists spread_signal double precision;
+            alter table decisions add column if not exists size double precision;
             alter table trades add column if not exists reason text;
             alter table trades add column if not exists direction text;
             alter table trades add column if not exists status text;
@@ -89,13 +90,13 @@ class DBClient:
     async def upsert_decision(self, trace: str, ts, bot_name: str, ob_l: str, ob_e: str,
                               inv_before: str, inv_after: str,
                               reason: str | None = None, direction: str | None = None,
-                              spread_signal: float | None = None):
+                              spread_signal: float | None = None, size: float | None = None):
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                insert into decisions (trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                insert into decisions (trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal, size)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 on conflict (trace) do update
                 set ob_l = excluded.ob_l,
                     ob_e = excluded.ob_e,
@@ -104,10 +105,11 @@ class DBClient:
                     reason = excluded.reason,
                     direction = excluded.direction,
                     spread_signal = excluded.spread_signal,
+                    size = excluded.size,
                     ts = excluded.ts,
                     bot_name = excluded.bot_name;
                 """,
-                trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal
+                trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal, size
             )
 
     async def insert_trade(self, trace: str, ts, bot_name: str, venue: str,
@@ -142,7 +144,7 @@ class DBClient:
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                select trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal
+                select trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal, size
                 from decisions
                 where bot_name = $1
                 order by ts desc

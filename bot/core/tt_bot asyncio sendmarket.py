@@ -751,22 +751,12 @@ class TTBot:
                 return "N/A"
         def _inv_json(inv_tuple):
             lq, le, eq, ee = inv_tuple
-            if lq > 0 and eq < 0:
-                ordered = [
-                    {"venue": "L", "qty": lq, "price": le},
-                    {"venue": "E", "qty": eq, "price": ee},
-                ]
-            elif eq > 0 and lq < 0:
-                ordered = [
+            return json.dumps(
+                [
                     {"venue": "E", "qty": eq, "price": ee},
                     {"venue": "L", "qty": lq, "price": le},
                 ]
-            else:
-                ordered = [
-                    {"venue": "L", "qty": lq, "price": le},
-                    {"venue": "E", "qty": eq, "price": ee},
-                ]
-            return json.dumps(ordered)
+            )
         def _inv_block(inv_tuple, spread_val=None, fill_info_local=None, include_lat: bool = True):
             lq, le, eq, ee = inv_tuple
             spread_inv = 0.0
@@ -787,13 +777,7 @@ class TTBot:
                 line_e = f"E -> Qty: {eq}, Price: {_fmt_price_local(ee)}"
                 line_l = f"L -> Qty: {lq}, Price: {_fmt_price_local(le)}"
             line_spread = f"Δ -> {spread_inv if spread_val is None else spread_val:.2f}%"
-            if lq > 0 and eq < 0:
-                ordered_lines = [line_l, line_e]
-            elif eq > 0 and lq < 0:
-                ordered_lines = [line_e, line_l]
-            else:
-                ordered_lines = [line_l, line_e]
-            return " | ".join(ordered_lines + [line_spread])
+            return " | ".join([line_e, line_l, line_spread])
 
         ts_readable = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ctx.get("ts", time.time())))
         reason = ctx.get("reason", "")

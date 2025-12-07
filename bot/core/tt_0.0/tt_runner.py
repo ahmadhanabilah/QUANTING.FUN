@@ -152,15 +152,17 @@ async def main():
                     f"[PENDING] trace={ctx.get('trace')} pending={pending} tol={tol_local}"
                 )
                 return
-            try:
-                logging.getLogger("Maker").info(
-                    f"[FILLED] TT finalize trace={ctx.get('trace')} pending={pending} tol={tol_local}"
-                )
-                maker_bot._log_trade_complete()
-            finally:
-                maker_bot._pending_tt = None
-                state.last_send_latency_L = None
-                state.last_send_latency_E = None
+            async def _finalize():
+                try:
+                    logging.getLogger("Maker").info(
+                        f"[FILLED] TT finalize trace={ctx.get('trace')} pending={pending} tol={tol_local}"
+                    )
+                    await maker_bot._log_trade_complete()
+                finally:
+                    maker_bot._pending_tt = None
+                    state.last_send_latency_L = None
+                    state.last_send_latency_E = None
+            asyncio.create_task(_finalize())
 
         def on_update():
             state.last_ob_ts = time.time()

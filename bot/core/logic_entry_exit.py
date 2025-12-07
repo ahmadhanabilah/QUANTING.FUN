@@ -5,34 +5,22 @@ from bot.common.decision import Decision
 def logic_entry_exit(state, spreads, minSpread, spreadTP,
                      lighter_ob, extended_ob, tt_min_hits: int = 3,
                      size_hint_le: float | None = None,
-                     size_hint_el: float | None = None):
+                     size_hint_el: float | None = None,
+                     max_position_value: float | None = None,
+                     signals_remaining: int | None = None):
     """
     TT-only logic (entries/exits). MT/TM paths removed.
     Adds warmup tags (WARM_UP_LE/WARM_UP_EL) for initial runs.
     """
-
+    
     def _clear_direction():
         state.current_direction = None
 
-    # emit latest spreads in-place (overwrites same console line)
-    try:
-        le_val = spreads.get("TT_LE")
-        el_val = spreads.get("TT_EL")
-        le_txt = f"{le_val:.4f}" if le_val is not None else "N/A"
-        el_txt = f"{el_val:.4f}" if el_val is not None else "N/A"
-        # Log strong spreads as full lines for easier tracking.
-        if (le_val is not None and le_val > minSpread) or (el_val is not None and el_val > minSpread):
-            print(f"[SPREAD] TT_LE={le_txt} TT_EL={el_txt}")
-        else:
-            print(f"[SPREAD] TT_LE={le_txt} TT_EL={el_txt}", end="\r", flush=True)
-    except Exception:
-        pass
-
     def _make_decision(venue: Venue, side: Side, reason: str, direction: str, size=None):
-        ob = lighter_ob if venue == Venue.L else extended_ob
-        price = ob.get("askPrice") if side == Side.LONG else ob.get("bidPrice")
-        d = Decision(ActionType.TAKE, venue, side, price=price, reason=reason, direction=direction)
-        size_hint = size if size is not None else (size_hint_le if reason in ("TT_LE", "WARM_UP_LE") else size_hint_el)
+        ob          = lighter_ob if venue == Venue.L else extended_ob
+        price       = ob.get("askPrice") if side == Side.LONG else ob.get("bidPrice")
+        d           = Decision(ActionType.TAKE, venue, side, price=price, reason=reason, direction=direction)
+        size_hint   = size if size is not None else (size_hint_le if reason in ("TT_LE", "WARM_UP_LE") else size_hint_el)
         if size_hint is not None:
             setattr(d, "_tt_size", size_hint)
         # track OB price for downstream logging/DB
@@ -43,16 +31,31 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
         return d
 
     warm_up_enabled = getattr(state, "warm_up_orders", False)
-    warm_stage = getattr(state, "warm_up_stage", "DONE")
+    warm_stage      = getattr(state, "warm_up_stage", "DONE")
+    def _size_ok(reason: str | None) -> bool:
+        if reason in ("TT_LE", "WARM_UP_LE"):
+            return bool(size_hint_le and size_hint_le > 0)
+        if reason in ("TT_EL", "WARM_UP_EL"):
+            return bool(size_hint_el and size_hint_el > 0)
+        return False
+
+    # respect trade cap early
+    if signals_remaining is not None and signals_remaining <= 0:
+        return Decision(ActionType.NONE)
+
     if warm_up_enabled:
         # gate normal logic until warm-up sequence completes
         if warm_stage == "LE_PENDING":
+            if not _size_ok("WARM_UP_LE"):
+                return Decision(ActionType.NONE)
             _clear_direction()
             return (
                 _make_decision(Venue.L, Side.LONG, "WARM_UP_LE", "entry"),
                 _make_decision(Venue.E, Side.SHORT, "WARM_UP_LE", "entry"),
             )
         if warm_stage == "EL_PENDING":
+            if not _size_ok("WARM_UP_EL"):
+                return Decision(ActionType.NONE)
             _clear_direction()
             return (
                 _make_decision(Venue.E, Side.LONG, "WARM_UP_EL", "exit"),
@@ -83,6 +86,8 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             }])[-max(tt_min_hits, 1):]
             state.tt_el_exit_history = hist
             if len(hist) >= tt_min_hits and all(h.get("spread", 0) > spreadTP for h in hist):
+                if not _size_ok("TT_EL"):
+                    return Decision(ActionType.NONE)
                 _clear_direction()
                 return (
                     _make_decision(Venue.E, Side.LONG, "TT_EL", "exit"),
@@ -110,6 +115,8 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             }])[-max(tt_min_hits, 1):]
             state.tt_le_exit_history = hist
             if len(hist) >= tt_min_hits and all(h.get("spread", 0) > spreadTP for h in hist):
+                if not _size_ok("TT_LE"):
+                    return Decision(ActionType.NONE)
                 _clear_direction()
                 return (
                     _make_decision(Venue.L, Side.LONG, "TT_LE", "exit"),
@@ -193,6 +200,17 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
 
     hits = getattr(state, tt_hits[best_key], 0)
     if hits < tt_min_hits:
+        return Decision(ActionType.NONE)
+
+    # max exposure cap for entries only
+    if max_position_value is not None and max_position_value > 0:
+        val_l = abs(getattr(state, "invL", 0.0) * getattr(state, "entry_price_L", 0) or 0)
+        val_e = abs(getattr(state, "invE", 0.0) * getattr(state, "entry_price_E", 0) or 0)
+        max_val = max(val_l, val_e)
+        if max_position_value == 0 or max_val >= max_position_value:
+            return Decision(ActionType.NONE)
+
+    if not _size_ok(best_key):
         return Decision(ActionType.NONE)
 
     _clear_direction()
