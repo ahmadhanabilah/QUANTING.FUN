@@ -124,26 +124,47 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
   const parseInventoryPayload = (raw?: string | null): InventoryEntry[] | null => {
     if (!raw) return null;
     const trimmed = raw.trim();
-    if (!trimmed.startsWith("[")) return null;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (!Array.isArray(parsed)) return null;
-      return parsed
-        .map((entry: any) => {
-          const venue = typeof entry?.venue === "string" ? entry.venue.toUpperCase() : "";
-          if (!venue) return null;
-          const qty = Number(entry?.qty);
-          const price = Number(entry?.price);
-          return {
-            venue,
-            qty: Number.isFinite(qty) ? qty : null,
-            price: Number.isFinite(price) ? price : null,
-          };
-        })
-        .filter((entry): entry is InventoryEntry => Boolean(entry && entry.venue));
-    } catch {
-      return null;
+    // JSON array payload (preferred)
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed)) return null;
+        return parsed
+          .map((entry: any) => {
+            const venue = typeof entry?.venue === "string" ? entry.venue.toUpperCase() : "";
+            if (!venue) return null;
+            const qty = Number(entry?.qty);
+            const price = Number(entry?.price);
+            return {
+              venue,
+              qty: Number.isFinite(qty) ? qty : null,
+              price: Number.isFinite(price) ? price : null,
+            };
+          })
+          .filter((entry): entry is InventoryEntry => Boolean(entry && entry.venue));
+      } catch {
+        return null;
+      }
     }
+    // fallback: parse "L -> Qty: x, Price: y | E -> ..." strings
+    const parts = trimmed.split("|");
+    const entries: InventoryEntry[] = [];
+    for (const part of parts) {
+      const text = part.trim();
+      const venueMatch = text.match(/^([A-Za-z])\s*(?:->|:)/);
+      if (!venueMatch) continue;
+      const venue = venueMatch[1].toUpperCase();
+      const qtyMatch = text.match(/Qty:\s*([-\d.eE+]+)/i);
+      const priceMatch = text.match(/Price:\s*([-\d.eE+]+)/i);
+      const qtyVal = qtyMatch ? Number(qtyMatch[1]) : null;
+      const priceVal = priceMatch ? Number(priceMatch[1]) : null;
+      entries.push({
+        venue,
+        qty: qtyVal !== null && Number.isFinite(qtyVal) ? qtyVal : null,
+        price: priceVal !== null && Number.isFinite(priceVal) ? priceVal : null,
+      });
+    }
+    return entries.length ? entries : null;
   };
 
   const calcDeltaFromInventory = (entries: InventoryEntry[]): number | null => {
@@ -163,6 +184,42 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
     return null;
   };
 
+  const deriveSize = (row: DecisionRow): number | null => {
+    if (row.size !== null && row.size !== undefined) return row.size;
+    const before = parseInventoryPayload(row.inv_before_str || "");
+    const after = parseInventoryPayload(row.inv_after_str || "");
+    const toMap = (inv: InventoryEntry[] | null) =>
+      (inv || []).reduce<Record<string, number>>((acc, entry) => {
+        if (entry.qty !== null && entry.qty !== undefined && Number.isFinite(entry.qty)) {
+          acc[entry.venue] = entry.qty;
+        }
+        return acc;
+      }, {});
+    const beforeMap = toMap(before);
+    const afterMap = toMap(after);
+    const venues = new Set([...Object.keys(beforeMap), ...Object.keys(afterMap)]);
+    const deltas: number[] = [];
+    venues.forEach((v) => {
+      const b = beforeMap[v] ?? 0;
+      const a = afterMap[v] ?? 0;
+      const delta = a - b;
+      if (Number.isFinite(delta)) {
+        deltas.push(Math.abs(delta));
+      }
+    });
+    if (deltas.length) {
+      const maxDelta = Math.max(...deltas);
+      if (Number.isFinite(maxDelta)) return maxDelta;
+    }
+    const parsedInv = after || before;
+    if (!parsedInv || !parsedInv.length) return null;
+    const qtys = parsedInv
+      .map((e) => (e.qty === null || e.qty === undefined ? null : Math.abs(e.qty)))
+      .filter((q): q is number => q !== null && Number.isFinite(q));
+    if (!qtys.length) return null;
+    return Math.max(...qtys);
+  };
+
   const formatInventoryEntries = (entries: InventoryEntry[]): string[] => {
     return entries.map((entry) => {
       const qty = entry.qty === null ? "—" : entry.qty.toString();
@@ -175,14 +232,24 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
     if (!invStr) return <div className="text-slate-500 text-xs">—</div>;
     const parsedInventory = parseInventoryPayload(invStr);
     if (parsedInventory && parsedInventory.length) {
+      const withValue = parsedInventory.map((entry) => {
+        const valueUsd = entry.qty != null && entry.price != null ? Math.abs(entry.qty) * entry.price : null;
+        return { ...entry, valueUsd };
+      });
       const deltaFromInv = calcDeltaFromInventory(parsedInventory);
+      const hasQty = withValue.some((entry) => entry.qty !== null && entry.qty !== 0);
       const deltaText =
         deltaFromInv !== null
           ? `Δ -> ${fmt(deltaFromInv, 2)}%`
-          : spread !== null && spread !== undefined
+          : hasQty && spread !== null && spread !== undefined
           ? `Δ -> ${fmt(spread, 2)}%`
           : "";
-      const formattedEntries = formatInventoryEntries(parsedInventory);
+      const formattedEntries = withValue.map((entry) => {
+        const qty = entry.qty === null ? "—" : entry.qty.toString();
+        const price = entry.price === null ? "—" : Number(entry.price).toFixed(6);
+        const val = entry.valueUsd === null ? "—" : Number(entry.valueUsd).toFixed(4);
+        return `${entry.venue} -> Qty: ${qty}, Price: ${price}, Value: ${val} USD`;
+      });
       return (
         <div className="space-y-1 text-[11px] text-slate-200 font-mono">
           {formattedEntries.map((line, idx) => (
@@ -217,7 +284,7 @@ export function DecisionsTable({ botId, apiBase, authHeaders, mode, onModeChange
     const title = row.direction ? row.direction.toUpperCase() : "—";
     const reason = row.reason || "—";
     const spread = row.spread_signal;
-    const size = row.size;
+    const size = deriveSize(row);
     return (
       <div className="text-[11px] text-slate-200 font-mono space-y-1">
         <div className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800/60 text-slate-200 uppercase">{title}</div>

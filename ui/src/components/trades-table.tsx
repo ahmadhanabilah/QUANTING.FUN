@@ -399,7 +399,7 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
       return null;
     };
 
-    const lines: string[] = [];
+    const entries: Array<{ venue: string; qty: number | null; price: number | null; valueUsd: number | null }> = [];
     let deltaLine: string | null = null;
 
     // try JSON shape
@@ -408,27 +408,51 @@ export function TradesTable({ botId, botName, apiBase, authHeaders, mode = 'live
       const arr = Array.isArray(parsed) ? parsed : [];
       const e = arr.find((x) => x && x.venue === 'E');
       const l = arr.find((x) => x && x.venue === 'L');
-      if (e) lines.push(`E -> Qty: ${fmt(e.qty, 6)}, Price: ${fmt(e.price, 6)}`);
-      if (l) lines.push(`L -> Qty: ${fmt(l.qty, 6)}, Price: ${fmt(l.price, 6)}`);
+      const pushEntry = (obj: any) => {
+        if (!obj) return;
+        const venue = obj.venue;
+        const qty = Number.isFinite(obj.qty) ? Number(obj.qty) : null;
+        const price = Number.isFinite(obj.price) ? Number(obj.price) : null;
+        const valueUsd = qty != null && price != null ? Math.abs(qty) * price : null;
+        entries.push({ venue, qty, price, valueUsd });
+      };
+      pushEntry(e);
+      pushEntry(l);
       const d = fmtDelta(l, e);
       if (d != null) deltaLine = `Δ -> ${fmt(d, 2)}%`;
     } catch {
       // fallback to legacy string parsing
       const norm = inv.replace("Δ:", "Δ ->").replace("Δ :", "Δ ->");
       const parts = norm.split("|").map((p) => p.trim()).filter(Boolean);
-      lines.push(...parts);
+      parts.forEach((part) => {
+        const venueMatch = part.match(/^([A-Za-z])\s*(?:->|:)/);
+        if (!venueMatch) return;
+        const venue = venueMatch[1].toUpperCase();
+        const qtyMatch = part.match(/Qty:\s*([-\d.eE+]+)/i);
+        const priceMatch = part.match(/Price:\s*([-\d.eE+]+)/i);
+        const qty = qtyMatch ? Number(qtyMatch[1]) : null;
+        const price = priceMatch ? Number(priceMatch[1]) : null;
+        const valueUsd = qty != null && price != null ? Math.abs(qty) * price : null;
+        entries.push({
+          venue,
+          qty: qty !== null && Number.isFinite(qty) ? qty : null,
+          price: price !== null && Number.isFinite(price) ? price : null,
+          valueUsd: valueUsd !== null && Number.isFinite(valueUsd) ? valueUsd : null,
+        });
+      });
       const deltaPart = parts.find((p) => p.includes("Δ"));
       if (deltaPart) deltaLine = deltaPart;
     }
 
-    if (deltaLine) lines.push(deltaLine);
-
     return (
       <div className="space-y-1">
         {showHeading && <div className="text-slate-300 text-xs font-semibold">{label}</div>}
-        {lines.map((p, idx) => (
-          <div key={idx} className="text-slate-400 text-[11px] font-mono">{p}</div>
+        {entries.map((entry, idx) => (
+          <div key={`${entry.venue}-${idx}`} className="text-slate-400 text-[11px] font-mono">
+            {entry.venue} &rarr; Qty: {fmt(entry.qty, 6)}, Price: {fmt(entry.price, 6)}, Value: {fmt(entry.valueUsd, 4)} USD
+          </div>
         ))}
+        {deltaLine && <div className="text-slate-400 text-[11px] font-mono">{deltaLine}</div>}
       </div>
     );
   };

@@ -243,21 +243,25 @@ async def _db_watchdog_loop():
         return f"{val:.0f}ms" if val is not None else "n/a"
 
     def _render_watchdog_table(row: dict) -> str:
-        inv_lines = row.get("inv_lines", [])
+        inv_lines = []
+        long_line = row.get("inv_long") or "—"
+        short_line = row.get("inv_short") or "—"
+        delta_line = row.get("inv_delta") or "—"
         lines = [
             f"{row['pair']} - Last 1m",
             "",
-            f"Entries LE/EL   : {row['entries']}",
-            f"Exits LE/EL     : {row['exits']}",
-            f"Trades L/E      : {row['trades']}",
-            f"Fills L/E       : {row['fills']}",
-            f"Lat Orders L/E  : {row['lat_orders']}",
-            f"Lat Fills L/E   : {row['lat_fills']}",
+            f"Entries LE/EL       : {row['entries']}",
+            f"Exits LE/EL         : {row['exits']}",
+            f"Trades L/E          : {row['trades']}",
+            f"Fills L/E           : {row['fills']}",
+            f"Avg Lat Orders L/E  : {row['lat_orders']}",
+            f"Avg Lat Fills L/E   : {row['lat_fills']}",
+            # "",
+            # "Latest Inv",
+            # f"Long Venue          : {long_line}",
+            # f"Short Venue         : {short_line}",
+            # f"Δ                   : {delta_line}",
         ]
-        if inv_lines:
-            lines.append("")
-            lines.append("Latest Inv")
-            lines.extend(inv_lines)
         body = "\n".join(lines)
         return f"<pre>{body}</pre>"
 
@@ -310,6 +314,9 @@ async def _db_watchdog_loop():
                 avg_o = summary.get("avg_lat_order_ms")
                 avg_f = summary.get("avg_lat_fill_ms")
                 inv_lines = []
+                inv_long = None
+                inv_short = None
+                inv_delta = None
                 if isinstance(inv_str, str):
                     parts = [p.strip() for p in inv_str.split("|") if p.strip()]
                     for part in parts:
@@ -317,13 +324,30 @@ async def _db_watchdog_loop():
                             # strip order/fill details, keep qty/price only
                             tokens = [t.strip() for t in part.split(",") if t.strip()]
                             trimmed = []
+                            qty_val = None
                             for tok in tokens:
                                 if tok.lower().startswith("order") or tok.lower().startswith("fill"):
                                     continue
                                 trimmed.append(tok)
-                            inv_lines.append(", ".join(trimmed))
+                                if tok.lower().startswith("qty:"):
+                                    try:
+                                        qty_val = float(tok.split(":")[1].strip())
+                                    except Exception:
+                                        qty_val = None
+                            line = ", ".join(trimmed)
+                            inv_lines.append(line)
+                            if qty_val is not None:
+                                if qty_val > 0 and inv_long is None:
+                                    inv_long = line
+                                elif qty_val < 0 and inv_short is None:
+                                    inv_short = line
                         elif "Δ" in part:
-                            inv_lines.append(part)
+                            inv_delta = part
+                    # fallback assign if not determined
+                    if inv_long is None and inv_lines:
+                        inv_long = inv_lines[0]
+                    if inv_short is None and len(inv_lines) > 1:
+                        inv_short = inv_lines[1]
                 entries_le = summary.get("entries_le", 0)
                 entries_el = summary.get("entries_el", 0)
                 exits_le = summary.get("exits_le", 0)
@@ -347,6 +371,9 @@ async def _db_watchdog_loop():
                         "lat_orders": f"{_fmt_lat(avg_o_L)} / {_fmt_lat(avg_o_E)}",
                         "lat_fills": f"{_fmt_lat(avg_f_L)} / {_fmt_lat(avg_f_E)}",
                         "inv_lines": inv_lines,
+                        "inv_long": inv_long,
+                        "inv_short": inv_short,
+                        "inv_delta": inv_delta,
                     }
                 )
 
@@ -611,6 +638,43 @@ async def api_tt_decisions(symbolL: str, symbolE: str, mode: str = "live", limit
     return {"rows": rows}
 
 
+def _parse_bot_name(bot_name: str):
+    try:
+        parts = bot_name.split(":")
+        if len(parts) >= 3 and parts[0] == "TT":
+            return parts[1], parts[2]
+    except Exception:
+        pass
+    return None, None
+
+
+@app.get("/api/tt/decisions_all")
+async def api_tt_decisions_all(mode: str = "live", limit: int = 200, user: str = Depends(_auth)):
+    db = await _get_db(mode)
+    records = await db.fetch_decisions_all(limit=limit)
+    rows = []
+    for r in records:
+        symL, symE = _parse_bot_name(r.get("bot_name", ""))
+        rows.append(
+            {
+                "trace_id": r.get("trace"),
+                "ts": r.get("ts"),
+                "reason": r.get("reason"),
+                "direction": r.get("direction"),
+                "spread_signal": r.get("spread_signal"),
+                "size": r.get("size"),
+                "ob_l": r.get("ob_l"),
+                "ob_e": r.get("ob_e"),
+                "inv_before_str": r.get("inv_before"),
+                "inv_after_str": r.get("inv_after"),
+                "bot_name": r.get("bot_name"),
+                "symbolL": symL,
+                "symbolE": symE,
+            }
+        )
+    return {"rows": rows}
+
+
 @app.get("/api/tt/trades")
 async def api_tt_trades(symbolL: str, symbolE: str, mode: str = "live", limit: int = 200, user: str = Depends(_auth)):
     db = await _get_db(mode)
@@ -637,6 +701,35 @@ async def api_tt_trades(symbolL: str, symbolE: str, mode: str = "live", limit: i
     return {"rows": rows}
 
 
+@app.get("/api/tt/trades_all")
+async def api_tt_trades_all(mode: str = "live", limit: int = 200, user: str = Depends(_auth)):
+    db = await _get_db(mode)
+    records = await db.fetch_trades_all(limit=limit)
+    rows = []
+    for r in records:
+        symL, symE = _parse_bot_name(r.get("bot_name", ""))
+        rows.append(
+            {
+                "trace": r.get("trace"),
+                "ts": r.get("ts"),
+                "venue": r.get("venue"),
+                "size": r.get("size"),
+                "ob_price": r.get("ob_price"),
+                "exec_price": r.get("exec_price"),
+                "lat_order": r.get("lat_order"),
+                "status": r.get("status"),
+                "payload": r.get("payload"),
+                "resp": r.get("resp"),
+                "reason": r.get("reason"),
+                "direction": r.get("direction"),
+                "bot_name": r.get("bot_name"),
+                "symbolL": symL,
+                "symbolE": symE,
+            }
+        )
+    return {"rows": rows}
+
+
 @app.get("/api/tt/fills")
 async def api_tt_fills(symbolL: str, symbolE: str, mode: str = "live", limit: int = 200, user: str = Depends(_auth)):
     db = await _get_db(mode)
@@ -652,6 +745,29 @@ async def api_tt_fills(symbolL: str, symbolE: str, mode: str = "live", limit: in
                 "base_amount": r.get("base_amount"),
                 "fill_price": r.get("fill_price"),
                 "latency": r.get("latency"),
+            }
+        )
+    return {"rows": rows}
+
+
+@app.get("/api/tt/fills_all")
+async def api_tt_fills_all(mode: str = "live", limit: int = 200, user: str = Depends(_auth)):
+    db = await _get_db(mode)
+    records = await db.fetch_fills_all(limit=limit)
+    rows = []
+    for r in records:
+        symL, symE = _parse_bot_name(r.get("bot_name", ""))
+        rows.append(
+            {
+                "trace": r.get("trace"),
+                "ts": r.get("ts"),
+                "venue": r.get("venue"),
+                "base_amount": r.get("base_amount"),
+                "fill_price": r.get("fill_price"),
+                "latency": r.get("latency"),
+                "bot_name": r.get("bot_name"),
+                "symbolL": symL,
+                "symbolE": symE,
             }
         )
     return {"rows": rows}

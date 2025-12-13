@@ -4,8 +4,19 @@ import { DecisionsTable } from './decisions-table';
 import { TradesTable } from './trades-table';
 import { BotSettings } from './bot-settings';
 
-const NUMBER_FIELDS = ['MIN_SPREAD', 'SPREAD_TP', 'REPRICE_TICK', 'MAX_POSITION_VALUE', 'MAX_TRADE_VALUE', 'MAX_OF_OB', 'MAX_TRADES', 'MIN_HITS'];
-const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS'];
+const NUMBER_FIELDS = [
+  'MIN_SPREAD',
+  'SPREAD_TP',
+  'REPRICE_TICK',
+  'MAX_POSITION_VALUE',
+  'MAX_TRADE_VALUE',
+  'MAX_OF_OB',
+  'MAX_TRADES',
+  'MIN_HITS',
+  'SLIPPAGE',
+  'ORDER_HEARTBEAT_INTERVAL',
+];
+const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS', 'ORDER_HEARTBEAT_ENABLED'];
 
 export type DetailTab = 'dashboard' | 'decisions' | 'trades' | 'settings';
 

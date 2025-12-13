@@ -46,6 +46,7 @@ class HyperliquidWS:
         self._ws_task: Optional[asyncio.Task] = None
         self._sdk_thread: Optional[threading.Thread] = None
         self._shutdown = threading.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._got_first_ob: bool = False
         # prefer SDK; fall back to raw WS if SDK is unavailable.
         self._use_sdk = _HYPER_SDK_AVAILABLE
@@ -63,6 +64,7 @@ class HyperliquidWS:
         """Start orderbook websocket."""
         if self._ws_task and not self._ws_task.done():
             return
+        self._loop = asyncio.get_running_loop()
         if self._use_sdk:
             self._ws_task = asyncio.create_task(self._run_sdk_ws())
         else:
@@ -87,14 +89,15 @@ class HyperliquidWS:
                     "HYPERLIQUID_API_URL",
                     getattr(hl_constants, "MAINNET_API_URL", "https://api.hyperliquid.xyz"),
                 )
-                logger.info(f"Subscribing [HYP OB] via SDK Info at {api_url}")
                 info = Info(api_url, skip_ws=False)  # type: ignore
                 info.subscribe({"type": "l2Book", "coin": self.symbol}, self._handle_sdk_message)
+                logger.info(f"[SUBSCRIBED {self.symbol}]")
                 while not self._shutdown.is_set():
                     await asyncio.sleep(1)
                 return
             except Exception as exc:
-                logger.error(f"HYP sdk ob stream error: {exc}; reconnecting in {backoff}s")
+                # suppress noisy reconnect logs; keep at debug level
+                logger.debug(f"HYP sdk ob stream error: {exc}; reconnecting in {backoff}s")
                 self.ob = {"bidPrice": 0.0, "askPrice": 0.0, "bidSize": 0.0, "askSize": 0.0}
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
@@ -150,7 +153,12 @@ class HyperliquidWS:
             return
         self.ob = new_ob
         if not self._got_first_ob:
-            logger.info("[HYP GOT FIRST OB]")
             self._got_first_ob = True
         if self._on_ob_update_cb:
-            self._on_ob_update_cb()
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._on_ob_update_cb)
+            else:
+                try:
+                    self._on_ob_update_cb()
+                except Exception:
+                    pass

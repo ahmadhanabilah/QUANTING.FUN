@@ -124,19 +124,14 @@ class ExtendedWS:
             return
 
         async def subscribe_orderbook():
-            got_first = False
             while True:
                 try:
-                    logger.info("Subscribing [OB]")
+                    logger.info(f"[SUBSCRIBED {self.symbol}]")
                     async with self._ws_client.subscribe_to_orderbooks(self.symbol, depth=1) as stream:
                         async for msg in stream:
-                            if not got_first:
-                                logger.info("[GOT THE FIRST WS NOTIF - OB]")
-                                got_first = True
-                                self._got_first_ob = True
                             self._handle_orderbook(msg.data)
                 except Exception as e:
-                    logger.error(f"OB stream error: {e}; reconnecting in 1s")
+                    logger.debug(f"OB stream error: {e}; reconnecting in 1s")
                     self.ob = {"bidPrice": 0.0, "askPrice": 0.0, "bidSize": 0.0, "askSize": 0.0}
                     await asyncio.sleep(1)
 
@@ -149,19 +144,14 @@ class ExtendedWS:
             return
 
         async def subscribe_account():
-            got_first = False
             while True:
                 try:
-                    logger.info("Subscribing [Acc]")
+                    logger.info(f"[SUBSCRIBED ACC {self.symbol}]")
                     async with self._ws_client.subscribe_to_account_updates(self.config["api_key"]) as stream:
                         async for msg in stream:
-                            if not got_first:
-                                logger.info("[GOT THE FIRST WS NOTIF - Acc]")
-                                got_first = True
-                                self._got_first_acc = True
                             self._handle_account(msg)
                 except Exception as e:
-                    logger.error(f"account stream error: {e}; reconnecting in 1s")
+                    logger.debug(f"account stream error: {e}; reconnecting in 1s")
                     await asyncio.sleep(1)
 
         self._account_task = asyncio.create_task(subscribe_account())
@@ -181,6 +171,9 @@ class ExtendedWS:
             }
             if self.dedup_ob and self.ob == new_ob:
                 return
+            if not self._got_first_ob:
+                self._got_first_ob = True
+                logger.info("[GOT THE FIRST WS NOTIF - OB]")
             self.ob = new_ob
 
             if self._on_ob_update_cb:
@@ -206,21 +199,25 @@ class ExtendedWS:
             if orders is None and isinstance(payload, dict):
                 orders = payload.get("orders")
 
+            orders_field_seen = (
+                orders is not None
+                or (isinstance(payload, dict) and "orders" in payload)
+                or msg_type == "ORDER"
+            )
             # Only treat a message as a positions update if the field is present (or type explicitly says so).
             positions_field_seen = (
                 positions is not None
                 or (isinstance(payload, dict) and "positions" in payload)
                 or msg_type == "POSITION"
             )
+            if (positions_field_seen or orders_field_seen) and not self._got_first_acc:
+                self._got_first_acc = True
+                logger.info("[GOT THE FIRST WS NOTIF - ACCOUNT]")
+            # print(msg)
             if positions_field_seen:
                 self._handle_positions(positions)
 
             # Orders-only messages should not flip the position-ready flag.
-            orders_field_seen = (
-                orders is not None
-                or (isinstance(payload, dict) and "orders" in payload)
-                or msg_type == "ORDER"
-            )
             if orders_field_seen and orders:
                 self._handle_orders(orders)
 
@@ -249,17 +246,22 @@ class ExtendedWS:
                 iterable = [iterable]
 
             found_pos = False
+            saw_any_position = False
             for pos in iterable:
                 if pos is None:
                     continue
+                saw_any_position = True
                 market = str(_get(pos, "market") or _get(pos, "symbol") or "")
                 if market.upper() != self.symbol.upper():
                     continue
                 # print(f"[POSITION NOTIF EXT] {pos}")
                 size_val = float(_get(pos, "size") or _get(pos, "position") or 0)
                 side_val = str(_get(pos, "side") or "").upper()
+                status_val = str(_get(pos, "status") or "").upper()
                 sign = -1 if side_val == "SHORT" else 1
                 qty = size_val * sign
+                if status_val == "CLOSED":
+                    qty = 0.0
                 entry_val = (
                     _get(pos, "openPrice")
                     or _get(pos, "open_price")
@@ -281,6 +283,9 @@ class ExtendedWS:
 
             # If the positions field was present but empty/missing our symbol, treat as flat.
             if not found_pos:
+                if saw_any_position:
+                    # ignore unrelated market positions; keep current state
+                    return
                 if self.position_qty != 0 or self._need_first_account_pos:
                     self.position_qty = 0.0
                     self.position_entry = 0.0
@@ -446,7 +451,7 @@ class ExtendedWS:
         except Exception as exc:
             logger.error(f"cancel failed: {exc}")
 
-    async def send_market(self, side: Side, size: float, price: float) -> Optional[dict]:
+    async def send_market(self, side: Side, size: float, price: float, is_heartbeat: bool = False) -> Optional[dict]:
         if not self._trading_client:
             logger.error("Extended trading unavailable")
             return None
@@ -459,25 +464,41 @@ class ExtendedWS:
         px = self._format_price(price)
         qty = self._format_qty(size)
 
-        try:
-            logger.info(f"send_market")
-            wall_start = time.time()
-            api_start = time.perf_counter()
-            resp = await self._trading_client.place_order(
-                market_name=self.symbol,
-                amount_of_synthetic=qty,
-                price=px,
-                side=side_enum,
-                post_only=False,
-                reduce_only=False,
-            )
-            api_ms = (time.perf_counter() - api_start) * 1000
-            wall_end = time.time()
-            logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
-            return {
-                "payload": {"price": px, "qty": qty, "side": side_enum.name},
-                "resp": str(resp),
-            }
-        except Exception as exc:
-            logger.error(f"market order failed: {exc}")
-            return {"error": str(exc), "payload": {"price": px, "qty": qty, "side": side_enum.name}}
+        last_err = None
+        max_attempts = 1 if is_heartbeat else 2
+        http_logger = logging.getLogger("x10.utils.http") if is_heartbeat else None
+        old_level = http_logger.level if http_logger else None
+        for attempt in range(max_attempts):
+            try:
+                if not is_heartbeat:
+                    logger.info(f"send_market")
+                wall_start = time.time()
+                api_start = time.perf_counter()
+                if http_logger and is_heartbeat:
+                    http_logger.setLevel(logging.CRITICAL)
+                try:
+                    resp = await self._trading_client.place_order(
+                        market_name=self.symbol,
+                        amount_of_synthetic=qty,
+                        price=px,
+                        side=side_enum,
+                        post_only=False,
+                        reduce_only=False,
+                    )
+                finally:
+                    if http_logger and is_heartbeat and old_level is not None:
+                        http_logger.setLevel(old_level)
+                api_ms = (time.perf_counter() - api_start) * 1000
+                wall_end = time.time()
+                if not is_heartbeat:
+                    logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
+                return {
+                    "payload": {"price": px, "qty": qty, "side": side_enum.name},
+                    "resp": str(resp),
+                }
+            except Exception as exc:
+                last_err = exc
+                if not is_heartbeat:
+                    logger.error(f"market order failed (attempt {attempt+1}): {exc}")
+                await asyncio.sleep(0.05)
+        return {"error": str(last_err), "payload": {"price": px, "qty": qty, "side": side_enum.name}}

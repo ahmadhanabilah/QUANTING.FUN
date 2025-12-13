@@ -24,7 +24,7 @@ from bot.common.enums import Side
 from bot.venues.helper_extended import ExtendedWS
 from bot.venues.helper_lighter import LighterWS
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_PATH = PROJECT_ROOT / ".env_bot"
 
 

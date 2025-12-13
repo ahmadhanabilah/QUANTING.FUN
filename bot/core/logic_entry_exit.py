@@ -85,7 +85,14 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
                 "asE": extended_ob.get("askSize"),
             }])[-max(tt_min_hits, 1):]
             state.tt_el_exit_history = hist
-            if len(hist) >= tt_min_hits and all(h.get("spread", 0) > spreadTP for h in hist):
+            # include current inventory spread as cushion
+            price_l = getattr(state, "priceInvL", 0) or 0
+            price_e = getattr(state, "priceInvE", 0) or 0
+            spread_inv = 0.0
+            if price_l:
+                spread_inv = ((price_e - price_l) / price_l) * 100
+            threshold = spreadTP - spread_inv
+            if len(hist) >= tt_min_hits and all(h.get("spread", 0) > threshold for h in hist):
                 if not _size_ok("TT_EL"):
                     return Decision(ActionType.NONE)
                 _clear_direction()
@@ -114,7 +121,13 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
                 "asE": extended_ob.get("askSize"),
             }])[-max(tt_min_hits, 1):]
             state.tt_le_exit_history = hist
-            if len(hist) >= tt_min_hits and all(h.get("spread", 0) > spreadTP for h in hist):
+            price_l = getattr(state, "priceInvL", 0) or 0
+            price_e = getattr(state, "priceInvE", 0) or 0
+            spread_inv = 0.0
+            if price_e:
+                spread_inv = ((price_l - price_e) / price_e) * 100
+            threshold = spreadTP - spread_inv
+            if len(hist) >= tt_min_hits and all(h.get("spread", 0) > threshold for h in hist):
                 if not _size_ok("TT_LE"):
                     return Decision(ActionType.NONE)
                 _clear_direction()

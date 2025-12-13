@@ -153,6 +153,19 @@ class DBClient:
                 bot_name, limit
             )
 
+    async def fetch_decisions_all(self, limit: int = 200):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                select trace, ts, bot_name, ob_l, ob_e, inv_before, inv_after, reason, direction, spread_signal, size
+                from decisions
+                order by ts desc
+                limit $1;
+                """,
+                limit
+            )
+
     async def fetch_trades(self, bot_name: str, limit: int = 200):
         pool = await self._get_pool()
         async with pool.acquire() as conn:
@@ -167,6 +180,19 @@ class DBClient:
                 bot_name, limit
             )
 
+    async def fetch_trades_all(self, limit: int = 200):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                select trace, ts, bot_name, venue, size, ob_price, exec_price, lat_order, reason, direction, status, payload, resp
+                from trades
+                order by ts desc
+                limit $1;
+                """,
+                limit
+            )
+
     async def fetch_fills(self, bot_name: str, limit: int = 200):
         pool = await self._get_pool()
         async with pool.acquire() as conn:
@@ -179,6 +205,19 @@ class DBClient:
                 limit $2;
                 """,
                 bot_name, limit
+            )
+
+    async def fetch_fills_all(self, limit: int = 200):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                select trace, ts, bot_name, venue, base_amount, fill_price, latency
+                from fills
+                order by ts desc
+                limit $1;
+                """,
+                limit
             )
 
     async def recent_summary(self, bot_name: str, since_ts) -> dict:

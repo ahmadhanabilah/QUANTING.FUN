@@ -3,17 +3,20 @@
     {
       "SYMBOL_LIGHTER": "BTC",
       "SYMBOL_EXTENDED": "BTC-USD",
-      "MIN_SPREAD": -0.1,
-      "SPREAD_TP": 0.2,
+      "MIN_SPREAD": 0,
+      "SPREAD_TP": -0.1,
       "REPRICE_TICK": 0,
-      "MAX_POSITION_VALUE": 100,
+      "MAX_POSITION_VALUE": 50,
       "MAX_TRADE_VALUE": 20,
       "MAX_OF_OB": 0.3,
-      "MAX_TRADES": null,
+      "MAX_TRADES": 10,
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0.04
     },
     {
       "SYMBOL_LIGHTER": "MEGA",
@@ -21,14 +24,17 @@
       "MIN_SPREAD": 0.4,
       "SPREAD_TP": 0.2,
       "REPRICE_TICK": 0,
-      "MAX_POSITION_VALUE": 3000,
+      "MAX_POSITION_VALUE": 5000,
       "MAX_TRADE_VALUE": 50,
       "MAX_OF_OB": 0.3,
       "MAX_TRADES": null,
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0.04
     },
     {
       "SYMBOL_LIGHTER": "ZEC",
@@ -43,7 +49,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "APEX",
@@ -58,7 +67,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "SUI",
@@ -73,7 +85,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "IP",
@@ -88,7 +103,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "MON",
@@ -103,7 +121,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "AERO",
@@ -118,7 +139,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "EDEN",
@@ -133,7 +157,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "NEW",
@@ -148,7 +175,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0.04
     },
     {
       "SYMBOL_LIGHTER": "RESOLV",
@@ -156,14 +186,17 @@
       "MIN_SPREAD": 0.3,
       "SPREAD_TP": 0.2,
       "REPRICE_TICK": 0,
-      "MAX_POSITION_VALUE": 500,
+      "MAX_POSITION_VALUE": 2500,
       "MAX_TRADE_VALUE": 25,
       "MAX_OF_OB": 0.3,
       "MAX_TRADES": null,
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "PUMP",
@@ -178,7 +211,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "SPX",
@@ -193,7 +229,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "FARTCOIN",
@@ -208,7 +247,10 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     },
     {
       "SYMBOL_LIGHTER": "GRASS",
@@ -223,7 +265,154 @@
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "PENDLE",
+      "SYMBOL_EXTENDED": "PENDLE-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "AVAX",
+      "SYMBOL_EXTENDED": "AVAX-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "WLFI",
+      "SYMBOL_EXTENDED": "WLFI-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "LINEA",
+      "SYMBOL_EXTENDED": "LINEA-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "ZRO",
+      "SYMBOL_EXTENDED": "ZRO-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "CRV",
+      "SYMBOL_EXTENDED": "CRV-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "STRK",
+      "SYMBOL_EXTENDED": "STRK-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
+    },
+    {
+      "SYMBOL_LIGHTER": "VIRTUAL",
+      "SYMBOL_EXTENDED": "VIRTUAL-USD",
+      "MIN_SPREAD": 0.3,
+      "SPREAD_TP": 0.2,
+      "REPRICE_TICK": 0,
+      "MAX_POSITION_VALUE": 500,
+      "MAX_TRADE_VALUE": 25,
+      "MAX_OF_OB": 0.3,
+      "MAX_TRADES": null,
+      "MIN_HITS": 1,
+      "TEST_MODE": false,
+      "DEDUP_OB": true,
+      "WARM_UP_ORDERS": false,
+      "ORDER_HEARTBEAT_ENABLED": true,
+      "ORDER_HEARTBEAT_INTERVAL": 20,
+      "SLIPPAGE": 0
     }
   ]
 }

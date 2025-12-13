@@ -213,6 +213,7 @@ class LighterWS:
                 await self._ws_trade.close()
             except Exception:
                 pass
+            self._ws_trade = None
         url = self.config["base_url"].replace("https", "wss") + "/stream"
         session = self._ws_session or aiohttp.ClientSession()
         self._ws_session = session
@@ -238,21 +239,16 @@ class LighterWS:
         async def run_ws():
             while True:
                 try:
-                    got_first = False
                     def _wrapped_ob_update(market_id, order_book):
-                        nonlocal got_first
-                        if not got_first:
-                            logger.info("[GOT THE FIRST WS NOTIF - OB]")
-                            got_first = True
-                            self._got_first_ob = True
                         self._handle_orderbook(market_id, order_book)
                     self.ws_client = WsClient(
                         order_book_ids=[self.market_id],
                         on_order_book_update=_wrapped_ob_update,
                     )
+                    logger.info(f"[SUBSCRIBED {self.symbol}]")
                     await self.ws_client.run_async()
                 except Exception as e:
-                    logger.error(f"error: {e}; reconnecting in 1s")
+                    logger.debug(f"ws error: {e}; reconnecting in 1s")
                     self.ob = {"bidPrice": 0.0, "askPrice": 0.0, "bidSize": 0.0, "askSize": 0.0}
                     await asyncio.sleep(1)
 
@@ -289,6 +285,9 @@ class LighterWS:
                 # skip if unchanged
                 if self.ob == new_ob:
                     return
+            if not self._got_first_ob:
+                self._got_first_ob = True
+                logger.info("[GOT THE FIRST WS NOTIF - OB]")
             self.ob = new_ob
 
             if self._on_ob_update_cb:
@@ -417,18 +416,10 @@ class LighterWS:
                     None,
                 )
             if not pos:
-                # if snapshot omits our market, treat as flat
-                if self.position_qty != 0:
-                    self.position_qty = 0.0
-                    self.position_entry = 0.0
-                    self._has_account_position = True
-                    if self.position_state_cb:
-                        self.position_state_cb(self.position_qty, self.position_entry)
-                else:
-                    self._has_account_position = True
+                # if snapshot omits our market, keep prior state (skip auto-flatten)
                 return
             
-            # print(f"[POSITION UPDATE LIG] {pos}")
+            # print(f"[POSITION NOTIF LIG] {pos}")
 
             qty_val = float(pos.get("position") or pos.get("size") or 0)
             sign_val = pos.get("sign")
@@ -594,7 +585,14 @@ class LighterWS:
         except Exception as exc:
             logger.error(f"cancel failed: {exc}")
 
-    async def send_market(self, side: Side, size: float, price: float | None = None, use_ws: bool = True) -> Optional[dict]:
+    async def send_market(
+        self,
+        side: Side,
+        size: float,
+        price: float | None = None,
+        use_ws: bool = True,
+        is_heartbeat: bool = False,
+    ) -> Optional[dict]:
         """Market order via WS (default) or REST.
 
         Args:
@@ -604,10 +602,16 @@ class LighterWS:
             use_ws: use websocket signing path (default) or REST fallback
         """
         if use_ws:
-            return await self._send_market_ws(side, size, price)
-        return await self._send_market_rest(side, size, price)
+            return await self._send_market_ws(side, size, price, is_heartbeat=is_heartbeat)
+        return await self._send_market_rest(side, size, price, is_heartbeat=is_heartbeat)
 
-    async def _send_market_ws(self, side: Side, size: float, price: float | None = None) -> Optional[dict]:
+    async def _send_market_ws(
+        self,
+        side: Side,
+        size: float,
+        price: float | None = None,
+        is_heartbeat: bool = False,
+    ) -> Optional[dict]:
         if not self.trading_client or self.market_id is None:
             logger.error("Lighter trading client not initialized")
             return None
@@ -630,37 +634,58 @@ class LighterWS:
         base_amount = self._fmt_decimal_int(size, self.size_decimals or 0)
         client_order_index = self._next_client_order_index()
 
-        try:
-            logger.info(f"send_market")
-            wall_start = time.time()
-            api_start = time.perf_counter()
-            await self._ensure_trade_ws()
-            tx_type, tx_info, tx_hash, err = self.trading_client.sign_create_order(
-                market_index=self.market_id,
-                client_order_index=client_order_index,
-                base_amount=base_amount,
-                price=px,
-                is_ask=is_ask,
-                order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
-                time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-                reduce_only=False,
-                trigger_price=0,
-            )
-            if err:
-                raise RuntimeError(err)
-            await self._send_tx(tx_type, tx_info)
-            api_ms = (time.perf_counter() - api_start) * 1000
-            wall_end = time.time()
-            logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
-            return {
-                "payload": {"price": px, "size": base_amount, "is_ask": is_ask},
-                "resp": tx_info,
-            }
-        except Exception as exc:
-            logger.error(f"market order failed: {exc}")
-            return {"error": str(exc), "payload": {"price": px, "size": base_amount, "is_ask": is_ask}}
+        last_err = None
+        max_attempts = 1 if is_heartbeat else 2
+        for attempt in range(max_attempts):
+            try:
+                if not is_heartbeat:
+                    logger.info(f"send_market")
+                wall_start = time.time()
+                api_start = time.perf_counter()
+                await self._ensure_trade_ws()
+                tx_type, tx_info, tx_hash, err = self.trading_client.sign_create_order(
+                    market_index=self.market_id,
+                    client_order_index=client_order_index,
+                    base_amount=base_amount,
+                    price=px,
+                    is_ask=is_ask,
+                    order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
+                    time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                    reduce_only=False,
+                    trigger_price=0,
+                )
+                if err:
+                    raise RuntimeError(err)
+                await self._send_tx(tx_type, tx_info)
+                api_ms = (time.perf_counter() - api_start) * 1000
+                wall_end = time.time()
+                if not is_heartbeat:
+                    logger.info(f"send_market done start_ts={wall_start:.3f} end_ts={wall_end:.3f} api_ms={api_ms:.1f}")
+                return {
+                    "payload": {"price": px, "size": base_amount, "is_ask": is_ask},
+                    "resp": tx_info,
+                }
+            except Exception as exc:
+                last_err = exc
+                if not is_heartbeat:
+                    logger.error(f"market order failed (attempt {attempt+1}): {exc}")
+                # force reconnect on any failure to avoid writing to a closing transport
+                try:
+                    if self._ws_trade:
+                        await self._ws_trade.close()
+                except Exception:
+                    pass
+                self._ws_trade = None
+                await asyncio.sleep(0.05)
+        return {"error": str(last_err), "payload": {"price": px, "size": base_amount, "is_ask": is_ask}}
 
-    async def _send_market_rest(self, side: Side, size: float, price: float | None = None) -> Optional[dict]:
+    async def _send_market_rest(
+        self,
+        side: Side,
+        size: float,
+        price: float | None = None,
+        is_heartbeat: bool = False,
+    ) -> Optional[dict]:
         if not self.trading_client or self.market_id is None:
             logger.error("Lighter trading client not initialized")
             return None
@@ -683,40 +708,55 @@ class LighterWS:
         base_amount = self._fmt_decimal_int(size, self.size_decimals or 0)
         client_order_index = self._next_client_order_index()
 
-        try:
-            prep_ts = time.perf_counter()
-            logger.info(
-                f"[LighterREST] send_market payload market_id={self.market_id} price={px} size={base_amount} is_ask={is_ask}"
-            )
-            api_start = time.perf_counter()
-            tx, tx_hash, err = await self.trading_client.create_order(
-                market_index=self.market_id,
-                client_order_index=client_order_index,
-                base_amount=base_amount,
-                price=px,
-                is_ask=is_ask,
-                order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
-                time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-                trigger_price=0,
-            )
-            if err:
-                raise RuntimeError(err)
-            api_ms = (time.perf_counter() - api_start) * 1000
-            total_ms = (time.perf_counter() - prep_ts) * 1000
-            logger.info(
-                f"[LighterREST] send_market done order_id={client_order_index} tx={tx_hash} "
-                f"api_ms={api_ms:.1f} total_ms={total_ms:.1f} market_id={self.market_id} price={px} size={base_amount} is_ask={is_ask}"
-            )
-            return {
-                "payload": {"price": px, "size": base_amount, "is_ask": is_ask},
-                "resp": tx_hash,
-            }
-        except Exception as exc:
-            logger.error(f"REST market order failed: {exc}")
-            return {"error": str(exc), "payload": {"price": px, "size": base_amount, "is_ask": is_ask}}
+        last_err = None
+        max_attempts = 1 if is_heartbeat else 2
+        for attempt in range(max_attempts):
+            try:
+                prep_ts = time.perf_counter()
+                if not is_heartbeat:
+                    logger.info(
+                        f"[LighterREST] send_market payload market_id={self.market_id} price={px} size={base_amount} is_ask={is_ask}"
+                    )
+                api_start = time.perf_counter()
+                tx, tx_hash, err = await self.trading_client.create_order(
+                    market_index=self.market_id,
+                    client_order_index=client_order_index,
+                    base_amount=base_amount,
+                    price=px,
+                    is_ask=is_ask,
+                    order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
+                    time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                    trigger_price=0,
+                )
+                if err:
+                    raise RuntimeError(err)
+                api_ms = (time.perf_counter() - api_start) * 1000
+                total_ms = (time.perf_counter() - prep_ts) * 1000
+                if not is_heartbeat:
+                    logger.info(
+                        f"[LighterREST] send_market done order_id={client_order_index} tx={tx_hash} "
+                        f"api_ms={api_ms:.1f} total_ms={total_ms:.1f} market_id={self.market_id} price={px} size={base_amount} is_ask={is_ask}"
+                    )
+                return {
+                    "payload": {"price": px, "size": base_amount, "is_ask": is_ask},
+                    "resp": tx_hash,
+                }
+            except Exception as exc:
+                last_err = exc
+                if not is_heartbeat:
+                    logger.error(f"REST market order failed (attempt {attempt+1}): {exc}")
+                try:
+                    if self._ws_trade:
+                        await self._ws_trade.close()
+                except Exception:
+                    pass
+                self._ws_trade = None
+                await asyncio.sleep(0.05)
+        return {"error": str(last_err), "payload": {"price": px, "size": base_amount, "is_ask": is_ask}}
 
     async def _send_tx(self, tx_type, tx_info) -> None:
         """Send a signed tx over trading websocket."""
+        await self._ensure_trade_ws()
         payload = {
             "type": "jsonapi/sendtx",
             "data": {
@@ -725,7 +765,12 @@ class LighterWS:
                 "tx_info": json.loads(tx_info),
             },
         }
-        await self._ws_trade.send_json(payload)
+        try:
+            await self._ws_trade.send_json(payload)
+        except Exception:
+            # reconnect once and retry
+            await self._ensure_trade_ws()
+            await self._ws_trade.send_json(payload)
         # Best effort read response
         try:
             msg = await self._ws_trade.receive(timeout=1)

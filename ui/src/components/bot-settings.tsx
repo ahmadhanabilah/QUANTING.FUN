@@ -30,6 +30,9 @@ const descriptions: Record<string, string> = {
   TEST_MODE: "Run in paper mode without real orders",
   DEDUP_OB: "If On, identical top-of-book snapshots won't be reprocessed",
   WARM_UP_ORDERS: "Send a tiny hedged TT once books are live to warm connections",
+  SLIPPAGE: "Slippage applied to market TOTAL legs (as a decimal, e.g. 0.04 = 4%)",
+  ORDER_HEARTBEAT_ENABLED: "Enable the 80% below bid send_market heartbeat",
+  ORDER_HEARTBEAT_INTERVAL: "Interval (seconds) between heartbeat orders",
 };
 
 const tips = [

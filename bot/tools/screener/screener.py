@@ -1,28 +1,28 @@
-# cd /root/arb_bot && source .venv/bin/activate && python -m screener.screener
-
 import asyncio
+import html
 import logging
 import os
 import time
-from pathlib import Path
-from typing import List, Tuple, Dict, Set, Optional, DefaultDict
 from collections import defaultdict
 from datetime import datetime
-import html
+from pathlib import Path
+from typing import DefaultDict, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
-from common.calc_spreads import calc_spreads
-from venues.helper_lighter import LighterWS
-from venues.helper_extended import ExtendedWS
+from bot.common.calc_spreads import calc_spreads
+from bot.venues.helper_lighter import LighterWS
+from bot.venues.helper_extended import ExtendedWS
+from bot.venues.helper_hyperliquid import HyperliquidWS
 
+# -------- config --------
 
-DEFAULT_THRESHOLD       = 0.3
-AGG_SECONDS             = 60
-ENABLE_TT               = os.getenv("SCREENER_ENABLE_TT", "true").lower() == "true"
-ENABLE_MT               = os.getenv("SCREENER_ENABLE_MT", "false").lower() == "true"
-ENABLE_TM               = os.getenv("SCREENER_ENABLE_TM", "false").lower() == "true"
-SPREAD_KEYS = []
+DEFAULT_THRESHOLD = float(os.getenv("SCREENER_THRESHOLD", "0.3"))
+AGG_SECONDS = 60
+ENABLE_TT = os.getenv("SCREENER_ENABLE_TT", "true").lower() == "true"
+ENABLE_MT = os.getenv("SCREENER_ENABLE_MT", "false").lower() == "true"
+ENABLE_TM = os.getenv("SCREENER_ENABLE_TM", "false").lower() == "true"
+SPREAD_KEYS: List[str] = []
 if ENABLE_TT:
     SPREAD_KEYS.append("TT")
 if ENABLE_MT:
@@ -34,37 +34,38 @@ SPREAD_MAP = {
     "MT": ["MT_LE", "MT_EL"],
     "TM": ["TM_LE", "TM_EL"],
 }
-TELEGRAM_TOKEN = "7409766261:AAHuwcll1fi3g5J8N_5R2qSF16dIMEYLUlI"
-TELEGRAM_CHAT_ID = "-1003203774300"
-TELEGRAM_TOPIC_ID = 4  # set to thread id if using a forum topic
+# Telegram
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOPIC_LE = os.getenv("TELEGRAM_TOPIC_LE", "")
+TELEGRAM_TOPIC_EH = os.getenv("TELEGRAM_TOPIC_EH", "")
+TELEGRAM_TOPIC_LH = os.getenv("TELEGRAM_TOPIC_LH", "")
 _tg_session: Optional[aiohttp.ClientSession] = None
-# pair -> key -> list of (timestamp, spread_percent)
+
+# hit storage: pair -> key -> list of (ts, spread)
 _hits: DefaultDict[str, Dict[str, List[Tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
 _hits_lock = asyncio.Lock()
 
+# -------- utils --------
 
-async def _send_telegram(text: str, code: bool = False):
-    """Send a plain text alert to Telegram."""
+
+async def _send_telegram(text: str, topic_id: str):
     global _tg_session
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     if _tg_session is None or _tg_session.closed:
         _tg_session = aiohttp.ClientSession()
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    if topic_id:
+        payload["message_thread_id"] = topic_id
     try:
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        if code:
-            payload["parse_mode"] = "HTML"
-            payload["text"] = f"<pre>{html.escape(text)}</pre>"
-        if TELEGRAM_TOPIC_ID:
-            payload["message_thread_id"] = TELEGRAM_TOPIC_ID
         await _tg_session.post(url, data=payload)
     except Exception as exc:
         logging.getLogger("Screener").error(f"[Screener] telegram send failed: {exc}")
 
 
 def _parse_pairs(args: List[str]) -> List[Tuple[str, str]]:
-    """Parse pairs in form LSYM:ESYM from CLI or SCREEN_PAIRS env."""
     if args:
         raw = args
     else:
@@ -73,13 +74,12 @@ def _parse_pairs(args: List[str]) -> List[Tuple[str, str]]:
     pairs: List[Tuple[str, str]] = []
     for item in raw:
         if ":" in item:
-            l_sym, e_sym = item.split(":", 1)
-            pairs.append((l_sym.strip(), e_sym.strip()))
+            a, b = item.split(":", 1)
+            pairs.append((a.strip(), b.strip()))
     return pairs
 
 
 async def _fetch_lighter_symbols() -> Set[str]:
-    """Fetch all Lighter symbols from orderBookDetails."""
     url = "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails"
     try:
         async with aiohttp.ClientSession() as session:
@@ -102,9 +102,6 @@ async def _fetch_lighter_symbols() -> Set[str]:
 
 
 async def _fetch_extended_markets() -> Dict[str, str]:
-    """
-    Fetch all Extended markets, return mapping asset -> market name (e.g. BTC -> BTC-USD).
-    """
     url = "https://api.starknet.extended.exchange/api/v1/info/markets"
     try:
         async with aiohttp.ClientSession() as session:
@@ -115,7 +112,8 @@ async def _fetch_extended_markets() -> Dict[str, str]:
             for m in data.get("data", []):
                 asset = str(m.get("assetName") or "").upper()
                 market = str(m.get("name") or "").upper()
-                if asset and market:
+                collateral = str(m.get("collateralAssetName") or "").upper()
+                if asset and market and collateral == "USD":
                     markets[asset] = market
         return markets
     except Exception as exc:
@@ -123,63 +121,103 @@ async def _fetch_extended_markets() -> Dict[str, str]:
         return {}
 
 
+async def _fetch_hyperliquid_assets() -> Set[str]:
+    url = os.getenv("HYPERLIQUID_INFO_URL", "https://api.hyperliquid.xyz/info")
+    payload = {"type": "meta"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json()
+        assets: Set[str] = set()
+        universe = []
+        if isinstance(data, dict):
+            universe = data.get("universe") or data.get("coins") or []
+        if isinstance(universe, list):
+            for item in universe:
+                if isinstance(item, str):
+                    assets.add(item.upper())
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("token") or item.get("coin")
+                    if name:
+                        assets.add(str(name).upper())
+        return assets
+    except Exception as exc:
+        logging.getLogger("Screener").error(f"[Screener] failed to fetch Hyperliquid markets: {exc}")
+        return set()
+
+
+# -------- monitors --------
+
+
 class PairMonitor:
-    def __init__(self, symbol_l: str, symbol_e: str, threshold: float):
-        self.symbol_l = symbol_l
-        self.symbol_e = symbol_e
+    def __init__(self, label: str, a, b, topic_id: str, threshold: float):
+        self.label = label  # e.g., "LE", "EH", "LH"
+        self.a = a
+        self.b = b
+        self.topic_id = topic_id
         self.threshold = threshold
-        self.L = LighterWS(symbol_l, read_only=True)
-        self.E = ExtendedWS(symbol_e, read_only=True)
         self._logger = logging.getLogger("Screener")
-        self._last_alert = {k: 0 for k in ["TT_LE", "TT_EL", "MT_LE", "MT_EL", "TM_LE", "TM_EL"]}
+        self._last_alert = defaultdict(float)
 
     async def start(self):
         def on_update():
             asyncio.create_task(self._handle_spread())
 
-        self.L.set_ob_callback(on_update)
-        self.E.set_ob_callback(on_update)
-
-        try:
-            await asyncio.gather(self.L.start(), self.E.start())
-        except Exception as exc:
-            self._logger.error(f"[Screener] start failed for {self.symbol_l}:{self.symbol_e} - {exc}")
+        self.a.set_ob_callback(on_update)
+        self.b.set_ob_callback(on_update)
+        await asyncio.gather(self.a.start(), self.b.start())
 
     async def _handle_spread(self):
         try:
-            lbid, lask = self.L.ob["bidPrice"], self.L.ob["askPrice"]
-            ebid, eask = self.E.ob["bidPrice"], self.E.ob["askPrice"]
-            if not all([lbid, lask, ebid, eask]):
+            abid, aask = self.a.ob["bidPrice"], self.a.ob["askPrice"]
+            bbid, bask = self.b.ob["bidPrice"], self.b.ob["askPrice"]
+            if not all([abid, aask, bbid, bask]):
                 return
-
-            spreads = calc_spreads(self.L, self.E)
+            spreads = calc_spreads(self.a, self.b)
             now = time.time()
             keys = []
             for group in SPREAD_KEYS:
                 keys.extend(SPREAD_MAP.get(group, []))
             for key in keys:
                 val = spreads.get(key)
-                if val is None:
+                if val is None or val <= self.threshold:
                     continue
-                # spreads already expressed in percent; compare directly to threshold
-                if val <= self.threshold:
+                if now - self._last_alert.get(key, 0) < float(os.getenv("SCREENER_COOLDOWN_SEC", "0.01")):
                     continue
-                self._logger.info(
-                    f"[Screener] {self.symbol_l}:{self.symbol_e} {key}={val:.2f}% "
-                    f"L bid/ask={lbid}/{lask} E bid/ask={ebid}/{eask}"
+                self._last_alert[key] = now
+                msg = (
+                    f"[Screener-{self.label}] {key}={val:.2f}% "
+                    f"{self._name_a()}"
+                    f" bid/ask={abid}/{aask} {self._name_b()} bid/ask={bbid}/{bask}"
                 )
-                # store hit for aggregation
-                pair_key = f"{self.symbol_l}/{self.symbol_e}"
+                self._logger.info(msg)
                 async with _hits_lock:
-                    _hits[pair_key][key].append((now, val))
+                    _hits[f"{self.label}:{self._pair_name()}"][key].append((now, val))
+                await _send_telegram(msg, self.topic_id)
         except Exception as exc:
-            self._logger.error(f"[Screener] spread handler error for {self.symbol_l}:{self.symbol_e}: {exc}")
+            self._logger.error(f"[Screener-{self.label}] spread handler error for {self._pair_name()}: {exc}")
+
+    def _pair_name(self) -> str:
+        try:
+            return f"{self.a.symbol}/{self.b.symbol}"
+        except Exception:
+            return "unknown"
+
+    def _name_a(self):
+        return getattr(self.a, "symbol", "A")
+
+    def _name_b(self):
+        return getattr(self.b, "symbol", "B")
+
+
+# -------- main --------
 
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
+
     class PrependFileHandler(logging.Handler):
         def __init__(self, path: Path):
             super().__init__()
@@ -200,107 +238,89 @@ async def main():
     logging.getLogger("Screener").propagate = False
 
     import sys
-    pairs = _parse_pairs(sys.argv[1:])
-    if not pairs:
-        # autodiscover pairs present on both venues (USD quote)
-        lighter_syms, extended_map = await asyncio.gather(
-            _fetch_lighter_symbols(), _fetch_extended_markets()
-        )
-        logger = logging.getLogger("Screener")
-        pairs = []
-        for sym in lighter_syms:
-            if sym in extended_map:
-                pairs.append((sym, extended_map[sym]))
-        logger.info(f"[Screener] Matching Pairs: {len(pairs)}")
-        if not pairs:
-            logger.error(
-                f"No pairs provided and no overlap detected between Lighter and Extended. "
-                f"example lighter symbols={list(lighter_syms)[:5]} "
-                f"example extended assets={list(extended_map.keys())[:5]}"
-            )
-            return
 
-    monitors = [PairMonitor(l, e, DEFAULT_THRESHOLD) for l, e in pairs]
+    # Explicit pairs via args/env (ESYM:HSYM, LSYM:ESYM, LSYM:HSYM)
+    le_pairs = _parse_pairs(os.getenv("SCREEN_PAIRS_LE", "").split(",") if os.getenv("SCREEN_PAIRS_LE") else [])
+    eh_pairs = _parse_pairs(os.getenv("SCREEN_PAIRS_EH", "").split(",") if os.getenv("SCREEN_PAIRS_EH") else [])
+    lh_pairs = _parse_pairs(os.getenv("SCREEN_PAIRS_LH", "").split(",") if os.getenv("SCREEN_PAIRS_LH") else [])
+
+    # If CLI provided, treat as L:E pairs to keep backward compat
+    cli_pairs = _parse_pairs(sys.argv[1:])
+    if cli_pairs:
+        le_pairs = cli_pairs
+
+    if not (le_pairs and eh_pairs and lh_pairs):
+        lighter_syms, extended_map, hyp_assets = await asyncio.gather(
+            _fetch_lighter_symbols(), _fetch_extended_markets(), _fetch_hyperliquid_assets()
+        )
+        if not le_pairs:
+            le_pairs = [(sym, extended_map[sym]) for sym in lighter_syms if sym in extended_map]
+        if not eh_pairs:
+            eh_pairs = [(mkt, asset) for asset, mkt in extended_map.items() if asset in hyp_assets]
+        if not lh_pairs:
+            lh_pairs = [(sym, sym) for sym in lighter_syms if sym in hyp_assets]
+        logging.getLogger("Screener").info(
+            f"[Screener] Matching Pairs: LE={len(le_pairs)} EH={len(eh_pairs)} LH={len(lh_pairs)}"
+        )
+
+    monitors: List[PairMonitor] = []
+    for l, e in le_pairs:
+        monitors.append(
+            PairMonitor("LE", LighterWS(l, read_only=True), ExtendedWS(e, read_only=True), TELEGRAM_TOPIC_LE, DEFAULT_THRESHOLD)
+        )
+    for e, h in eh_pairs:
+        monitors.append(
+            PairMonitor("EH", HyperliquidWS(h, read_only=True), ExtendedWS(e, read_only=True), TELEGRAM_TOPIC_EH, DEFAULT_THRESHOLD)
+        )
+    for l, h in lh_pairs:
+        monitors.append(
+            PairMonitor("LH", LighterWS(l, read_only=True), HyperliquidWS(h, read_only=True), TELEGRAM_TOPIC_LH, DEFAULT_THRESHOLD)
+        )
+
+    if not monitors:
+        logging.getLogger("Screener").error("No pairs to monitor; provide SCREEN_PAIRS_* or ensure overlaps exist.")
+        return
+
     tasks = [asyncio.create_task(m.start()) for m in monitors]
 
     async def aggregator():
         logger = logging.getLogger("Screener")
 
         def _median(values: List[float]) -> float:
-            vals = sorted(values)
-            n = len(vals)
+            values = sorted(values)
+            n = len(values)
             if n == 0:
                 return 0.0
             mid = n // 2
             if n % 2 == 1:
-                return vals[mid]
-            return (vals[mid - 1] + vals[mid]) / 2
+                return values[mid]
+            return (values[mid - 1] + values[mid]) / 2
 
         while True:
             await asyncio.sleep(AGG_SECONDS)
+            now = time.time()
+            rows = []
             async with _hits_lock:
-                snapshot = dict(_hits)
-                _hits.clear()
-            if not snapshot:
-                continue
-            # build entries with a max LE/EL avg for sorting
-            entries = []
-            for pair, keys in snapshot.items():
-                sym_l = pair.split("/", 1)[0]
-                stats: Dict[str, Dict[str, float]] = {}
-                max_avg = None
-                combined: DefaultDict[str, List[Tuple[float, float]]] = defaultdict(list)
-                for key, vals in keys.items():
-                    short = key.split("_", 1)[-1] if "_" in key else key
-                    if short in ("LE", "EL"):
-                        combined[short].extend(vals)
+                for pair, key_map in list(_hits.items()):
+                    for key, vals in list(key_map.items()):
+                        key_map[key] = [(ts, v) for ts, v in vals if ts >= now - AGG_SECONDS]
+                        if not key_map[key]:
+                            continue
+                        spreads_only = [v for _, v in key_map[key]]
+                        rows.append((pair, key, len(spreads_only), max(spreads_only), _median(spreads_only)))
+            if rows:
+                rows.sort(key=lambda r: r[3], reverse=True)
+                lines = [
+                    f"{pair} {key} hits={cnt} max={mx:.2f}% med={med:.2f}%"
+                    for pair, key, cnt, mx, med in rows
+                ]
+                msg = "[Screener agg " + datetime.utcnow().strftime("%H:%M:%S") + "] " + "; ".join(lines)
+                logger.info(msg)
 
-                for short, vals in combined.items():
-                    if not vals:
-                        continue
-                    times = [t for t, _ in vals]
-                    spreads = [v for _, v in vals]
-                    avg = sum(spreads) / len(spreads)
-                    max_avg = avg if max_avg is None or avg > max_avg else max_avg
-                    span_ms = int((max(times) - min(times)) * 1000) if len(times) > 1 else 0
-                    stats[short] = {
-                        "count": len(spreads),
-                        "max": max(spreads),
-                        "min": min(spreads),
-                        "avg": avg,
-                        "median": _median(spreads),
-                        "span_ms": span_ms,
-                    }
-
-                if not stats:
-                    continue
-                entries.append((max_avg or 0.0, sym_l, stats))
-            # sort descending by max avg
-            entries.sort(key=lambda x: x[0], reverse=True)
-            lines: List[str] = []
-            for _, sym, stats in entries:
-                lines.append(f"••••• {sym} •••••")
-                for short in ("LE", "EL"):
-                    data = stats.get(short)
-                    if not data:
-                        continue
-                    stat_text = (
-                        f"{short}: {data['count']} Hits "
-                        f"[{data['max']:.2f}%, {data['min']:.2f}%, {data['avg']:.2f}%, {data['median']:.2f}%, {data['span_ms']}ms]"
-                    )
-                    lines.append(stat_text)
-            msg = "\n".join(lines)
-            try:
-                await _send_telegram(msg, code=False)
-            except Exception as exc:
-                logger.error(f"[Screener] failed to send aggregated alert: {exc}")
-
-    agg_task = asyncio.create_task(aggregator())
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    agg_task.cancel()
-    for idx, res in enumerate(results):
+    results = await asyncio.gather(*tasks, aggregator(), return_exceptions=True)
+    for idx, res in enumerate(results[:-1]):  # last is aggregator
         if isinstance(res, Exception):
-            logging.getLogger("Screener").error(f"[Screener] monitor {monitors[idx].symbol_l}:{monitors[idx].symbol_e} crashed: {res}")
+            logging.getLogger("Screener").error(f"[Screener] monitor crashed: {res}")
 
 
 if __name__ == "__main__":
