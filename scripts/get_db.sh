@@ -6,7 +6,7 @@ ENV_FILE="${ROOT}/.env_server"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: scripts/get_db.sh BOT_NAME [decisions|trades|fills|all] [limit]" >&2
-  echo "Example: scripts/get_db.sh BTC:BTC-USD trades 100" >&2
+  echo "Example: bash scripts/get_db.sh MEGA:MEGA-USD trades 100" >&2
   exit 1
 fi
 

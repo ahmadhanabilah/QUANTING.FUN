@@ -21,11 +21,10 @@ os.chdir(PROJECT_ROOT)
 
 
 def _load_env():
-    for fname in [".env_bot", ".env_server"]:
-        env_path = PROJECT_ROOT / fname
-        if not env_path.exists():
-            continue
-        with env_path.open() as f:
+    def _load_from(path: Path):
+        if not path.exists():
+            return
+        with path.open() as f:
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -35,6 +34,12 @@ def _load_env():
                 v = v.strip().strip('"').strip("'")
                 if k and k not in os.environ:
                     os.environ[k] = v
+
+    _load_from(PROJECT_ROOT / ".env_server")
+    env_dir = PROJECT_ROOT / "env"
+    if env_dir.exists():
+        for env_path in sorted(env_dir.glob(".env_*")):
+            _load_from(env_path)
 
 
 async def main():
@@ -53,15 +58,15 @@ async def main():
     def pick_cfg(sym_l: str | None, sym_e: str | None):
         if sym_l:
             for item in symbols_cfg:
-                if item.get("SYMBOL_LIGHTER") == sym_l and (sym_e is None or item.get("SYMBOL_EXTENDED") == sym_e):
+                if item.get("SYM_VENUE1") == sym_l and (sym_e is None or item.get("SYM_VENUE2") == sym_e):
                     return item
         return symbols_cfg[0] if symbols_cfg else {}
 
     arg_symL = sys.argv[1] if len(sys.argv) > 1 else None
     arg_symE = sys.argv[2] if len(sys.argv) > 2 else None
     cfg_item = pick_cfg(arg_symL, arg_symE)
-    symbolL = cfg_item.get("SYMBOL_LIGHTER", arg_symL or "MEGA")
-    symbolE = cfg_item.get("SYMBOL_EXTENDED", arg_symE or "MEGA-USD")
+    symbolL = cfg_item.get("SYM_VENUE1", arg_symL or "MEGA")
+    symbolE = cfg_item.get("SYM_VENUE2", arg_symE or "MEGA-USD")
 
     # basic console logging only (no file writes)
     formatter = logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")

@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowLeft, ChevronDown, LogOut, Plus, Search, Settings as SettingsIcon, TrendingUp } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, ChevronDown, LogOut, Plus, Search, Settings as SettingsIcon, TrendingUp } from "lucide-react";
 import "./index.css";
 import { BotCard } from "./components/bot-card";
 import { BotDetailView } from "./components/bot-detail-view";
@@ -7,7 +7,7 @@ import { SettingsPanel } from "./components/settings-panel";
 import type { DetailTab } from "./components/bot-detail-view";
 import { LoginPage } from "./components/login-page";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
-import { LatestTrades } from "./components/latest-trades";
+import { ActivitiesOverview } from "./components/activities-overview";
 import {
     Dialog,
     DialogContent,
@@ -19,20 +19,30 @@ import {
 } from "./components/ui/dialog";
 
 type SymbolCfg = Record<string, any> & {
-    SYMBOL_LIGHTER: string;
-    SYMBOL_EXTENDED: string;
+    name?: string;
+    id?: string;
+    SYM_VENUE1: string;
+    SYM_VENUE2: string;
+    VENUE1?: string;
+    VENUE2?: string;
+    L?: string;
+    E?: string;
+    ACC_V1?: string;
+    ACC_V2?: string;
 };
 
-type Tab = "dashboard" | "trades" | "settings";
+type Tab = "dashboard" | "activities" | "settings";
 
 type EnvLine =
     | { type: "pair"; key: string; value: string }
     | { type: "comment"; raw: string };
 
 type BotCardModel = {
-    id: string;
+    id: string; // 6-letter ID
+    pairId: string; // SYM_VENUE1:SYM_VENUE2
     name: string;
     pair: string;
+    botName?: string;
     status: "running" | "stopped";
     profit24h: number;
     trades24h: number;
@@ -40,6 +50,13 @@ type BotCardModel = {
     L: string;
     E: string;
 };
+
+type AccountOption = {
+    name: string;
+    type: string;
+    values?: Record<string, string>;
+};
+const accountKey = (name: string, type: string) => `${name}::${type}`;
 
 type ServerHealth = {
     cpu: { percent: number; per_core?: number[]; count: number };
@@ -55,8 +72,14 @@ type ServerHealth = {
 };
 
 type CreateBotDraft = {
-    SYMBOL_LIGHTER: string;
-    SYMBOL_EXTENDED: string;
+    name?: string;
+    id?: string;
+    VENUE1: string;
+    SYM_VENUE1: string;
+    VENUE2: string;
+    SYM_VENUE2: string;
+    ACC_V1?: string;
+    ACC_V2?: string;
     MIN_SPREAD: number;
     SPREAD_TP: number;
     REPRICE_TICK: number;
@@ -98,6 +121,12 @@ type BulkPreviewResult = {
     };
 };
 
+const ACCOUNT_FIELDS: Record<string, string[]> = {
+    LIGHTER: ["LIGHTER_API_PRIVATE_KEY", "LIGHTER_ACCOUNT_INDEX", "LIGHTER_API_KEY_INDEX"],
+    EXTENDED: ["EXTENDED_VAULT_ID", "EXTENDED_PRIVATE_KEY", "EXTENDED_PUBLIC_KEY", "EXTENDED_API_KEY"],
+    HYPERLIQUID: ["API_ADDRESS", "API_PRIVATE_KEY"],
+};
+
 const BULK_STATUS_STYLES: Record<BulkEntryPreview["status"], { label: string; className: string }> = {
     ready: {
         label: "Ready",
@@ -118,8 +147,14 @@ const BULK_STATUS_STYLES: Record<BulkEntryPreview["status"], { label: string; cl
 };
 
 const BASE_BOT_DRAFT: CreateBotDraft = {
-    SYMBOL_LIGHTER: "NEW",
-    SYMBOL_EXTENDED: "NEW-USD",
+    name: "",
+    id: "",
+    VENUE1: "LIGHTER",
+    SYM_VENUE1: "NEW",
+    VENUE2: "EXTENDED",
+    SYM_VENUE2: "NEW-USD",
+    ACC_V1: "",
+    ACC_V2: "",
     MIN_SPREAD: 0.3,
     SPREAD_TP: 0.2,
     REPRICE_TICK: 0,
@@ -161,15 +196,47 @@ const makeBotDraft = (overrides: Partial<CreateBotDraft> = {}): CreateBotDraft =
     ...overrides,
 });
 
-function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>): SymbolCfg | null {
+const randomId = () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let out = "";
+    for (let i = 0; i < 6; i++) {
+        out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+};
+
+const sanitizeSymbol = (sym: SymbolCfg): SymbolCfg => {
+    const { L, E, ...rest } = sym as any;
+    const copy: any = { ...rest };
+    if (!copy.id) {
+        copy.id = randomId();
+    }
+    return copy as SymbolCfg;
+};
+
+type AccountOption = {
+    name: string;
+    type: "LIGHTER" | "EXTENDED" | "HYPERLIQUID" | string;
+};
+type AccountLookup = (name?: string) => string | undefined;
+
+function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>, accountLookup?: AccountLookup): SymbolCfg | null {
     const merged: CreateBotDraft = {
         ...makeBotDraft(),
         ...(entry as Partial<CreateBotDraft>),
     };
     const clean = (val: any) => (typeof val === "string" ? val.trim() : val);
-    const symL = clean(entry?.SYMBOL_LIGHTER ?? merged.SYMBOL_LIGHTER);
-    const symE = clean(entry?.SYMBOL_EXTENDED ?? merged.SYMBOL_EXTENDED);
-    if (!symL || !symE) {
+    const nameVal = clean(entry?.name ?? merged.name);
+    const idVal = clean(entry?.id ?? merged.id);
+    const symL = clean(entry?.SYM_VENUE1 ?? merged.SYM_VENUE1);
+    const symE = clean(entry?.SYM_VENUE2 ?? merged.SYM_VENUE2);
+    const accV1 = clean(entry?.ACC_V1 ?? merged.ACC_V1) || "";
+    const accV2 = clean(entry?.ACC_V2 ?? merged.ACC_V2) || "";
+    const rawVenue1 = clean(entry?.VENUE1 ?? merged.VENUE1);
+    const rawVenue2 = clean(entry?.VENUE2 ?? merged.VENUE2);
+    const venue1 = rawVenue1 || (accV1 ? accountLookup?.(accV1) : undefined) || "LIGHTER";
+    const venue2 = rawVenue2 || (accV2 ? accountLookup?.(accV2) : undefined) || "EXTENDED";
+        if (!symL || !symE) {
         return null;
     }
     const toNumber = (raw: any, fallback: number) => {
@@ -195,8 +262,14 @@ function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>)
         return num;
     };
     return {
-        SYMBOL_LIGHTER: String(symL).trim(),
-        SYMBOL_EXTENDED: String(symE).trim(),
+        name: nameVal || `${symL}-${symE}`,
+        id: idVal || randomId(),
+        VENUE1: String(venue1).trim(),
+        SYM_VENUE1: String(symL).trim(),
+        VENUE2: String(venue2).trim(),
+        SYM_VENUE2: String(symE).trim(),
+        ACC_V1: accV1,
+        ACC_V2: accV2,
         MIN_SPREAD: toNumber(entry?.MIN_SPREAD ?? merged.MIN_SPREAD, merged.MIN_SPREAD),
         SPREAD_TP: toNumber(entry?.SPREAD_TP ?? merged.SPREAD_TP, merged.SPREAD_TP),
         REPRICE_TICK: toNumber(entry?.REPRICE_TICK ?? merged.REPRICE_TICK, merged.REPRICE_TICK),
@@ -225,6 +298,14 @@ const API_BASE =
 function buildAuth(user: string, pass: string) {
     const token = btoa(unescape(encodeURIComponent(`${user}:${pass}`)));
     return { Authorization: `Basic ${token}` };
+}
+
+function stripVenueSymbol(value?: string) {
+    if (!value) {
+        return "";
+    }
+    const idx = value.indexOf(":");
+    return idx >= 0 ? value.slice(idx + 1) : value;
 }
 
 function parseEnv(text: string): EnvLine[] {
@@ -302,12 +383,12 @@ function parseBulkInput(raw: string): { items: BulkInputItem[]; errors: string[]
             if (!clean) return;
             const parts = clean.split(/[,\s]+/).filter(Boolean);
             if (parts.length < 2) {
-                errors.push(`Line ${idx + 1}: expected SYMBOL_LIGHTER and SYMBOL_EXTENDED`);
+                errors.push(`Line ${idx + 1}: expected SYM_VENUE1 and SYM_VENUE2`);
                 return;
             }
             const entry: Partial<CreateBotDraft> = {
-                SYMBOL_LIGHTER: parts[0],
-                SYMBOL_EXTENDED: parts[1],
+                SYM_VENUE1: parts[0],
+                SYM_VENUE2: parts[1],
             };
             if (parts[2]) entry.MIN_SPREAD = Number(parts[2]);
             if (parts[3]) entry.SPREAD_TP = Number(parts[3]);
@@ -318,9 +399,9 @@ function parseBulkInput(raw: string): { items: BulkInputItem[]; errors: string[]
     }
 }
 
-function buildBulkPreview(raw: string, existing: SymbolCfg[]): BulkPreviewResult {
+function buildBulkPreview(raw: string, existing: SymbolCfg[], accountLookup?: AccountLookup): BulkPreviewResult {
     const { items, errors } = parseBulkInput(raw);
-    const existingKeys = new Set(existing.map((s) => `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`));
+    const existingKeys = new Set(existing.map((s) => `${s.SYM_VENUE1}:${s.SYM_VENUE2}`));
     const seen = new Set<string>();
     const readyEntries: SymbolCfg[] = [];
     const entryPreviews: BulkEntryPreview[] = [];
@@ -329,7 +410,7 @@ function buildBulkPreview(raw: string, existing: SymbolCfg[]): BulkPreviewResult
     let existingCount = 0;
     let invalid = 0;
     items.forEach((item) => {
-        const normalized = normalizeBotEntry(item.entry);
+        const normalized = normalizeBotEntry(item.entry, accountLookup);
         if (!normalized) {
             invalid += 1;
             entryPreviews.push({
@@ -340,8 +421,8 @@ function buildBulkPreview(raw: string, existing: SymbolCfg[]): BulkPreviewResult
             });
             return;
         }
-        const key = `${normalized.SYMBOL_LIGHTER}:${normalized.SYMBOL_EXTENDED}`;
-        const pairLabel = `${normalized.SYMBOL_LIGHTER}/${normalized.SYMBOL_EXTENDED}`;
+        const key = `${normalized.SYM_VENUE1}:${normalized.SYM_VENUE2}`;
+        const pairLabel = `${normalized.SYM_VENUE1}/${normalized.SYM_VENUE2}`;
         if (seen.has(key)) {
             duplicates += 1;
             entryPreviews.push({
@@ -439,15 +520,26 @@ export default function App() {
     const [botFilter, setBotFilter] = useState<"all" | "pinned" | "other">("all");
     const [startAllLoading, setStartAllLoading] = useState(false);
     const [stopAllLoading, setStopAllLoading] = useState(false);
+    const [accounts, setAccounts] = useState<AccountOption[]>([]);
+    const [newAccount, setNewAccount] = useState<{ name: string; type: string }>({ name: "", type: "LIGHTER" });
+    const [accountEdits, setAccountEdits] = useState<
+        Record<string, { type: string; values: Record<string, string>; originalName: string }>
+    >({});
+    const [accountError, setAccountError] = useState("");
+    const [accountSaving, setAccountSaving] = useState(false);
+    const [editingAccounts, setEditingAccounts] = useState<Record<string, boolean>>({});
+    const [editingNames, setEditingNames] = useState<Record<string, string>>({});
+    const [accountPendingRemoval, setAccountPendingRemoval] = useState<{ name: string; type: string } | null>(null);
+    const handleNav = (tab: Tab) => {
+        setActiveTab(tab);
+        if (selectedPair) {
+            setSelectedPair(null);
+            localStorage.removeItem("selectedPair");
+            localStorage.removeItem("selectedTab");
+        }
+    };
 
     const authHeaders = useMemo(() => buildAuth(user, pass), [user, pass]);
-    const bulkPreview = useMemo(() => buildBulkPreview(bulkInput, symbols), [bulkInput, symbols]);
-    const bulkStatChips = [
-        { label: "Ready", value: bulkPreview.counts.ready, className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" },
-        { label: "Existing", value: bulkPreview.counts.existing, className: "border-slate-500/40 bg-slate-500/10 text-slate-200" },
-        { label: "Duplicates", value: bulkPreview.counts.duplicates, className: "border-amber-500/40 bg-amber-500/10 text-amber-300" },
-        { label: "Invalid", value: bulkPreview.counts.invalid, className: "border-red-500/40 bg-red-500/10 text-red-300" },
-    ];
     const serverStatusSummary = useMemo(() => {
         if (!serverStatus) return null;
         const cpuCapacity = serverStatus.cpu?.count ? `${serverStatus.cpu.count} cores` : "—";
@@ -458,20 +550,98 @@ export default function App() {
         };
     }, [serverStatus]);
 
+    const configSymbols = useMemo(() => {
+        return Array.isArray(configData?.symbols)
+            ? (configData?.symbols as SymbolCfg[]).map((sym) => sanitizeSymbol(sym))
+            : [];
+    }, [configData]);
+
+    const accountTypeByName = useMemo(() => {
+        const map: Record<string, string> = {};
+        accounts.forEach((acc) => {
+            if (acc?.name) {
+                map[acc.name] = (acc.type || "").toUpperCase();
+            }
+        });
+        return map;
+    }, [accounts]);
+
+    const getAccountType = useCallback(
+        (name?: string) => {
+            if (!name) return undefined;
+            return accountTypeByName[name];
+        },
+        [accountTypeByName]
+    );
+
+    const bulkPreview = useMemo(() => buildBulkPreview(bulkInput, symbols, getAccountType), [bulkInput, symbols, getAccountType]);
+    const bulkStatChips = [
+        { label: "Ready", value: bulkPreview.counts.ready, className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" },
+        { label: "Existing", value: bulkPreview.counts.existing, className: "border-slate-500/40 bg-slate-500/10 text-slate-200" },
+        { label: "Duplicates", value: bulkPreview.counts.duplicates, className: "border-amber-500/40 bg-amber-500/10 text-amber-300" },
+        { label: "Invalid", value: bulkPreview.counts.invalid, className: "border-red-500/40 bg-red-500/10 text-red-300" },
+    ];
+
+    const ID_PATTERN = /^[A-Z]{6}$/;
+
+    const findConfigId = (symL: string, symE: string) => {
+        const match = configSymbols.find(
+            (entry) => entry?.SYM_VENUE1 === symL && entry?.SYM_VENUE2 === symE
+        );
+        return match?.id;
+    };
+
+    const isVenueLight = (venue?: string) => (venue || "").toUpperCase().startsWith("LIGHT");
+    const isVenueExtended = (venue?: string) => (venue || "").toUpperCase().startsWith("EXT");
     const bots: BotCardModel[] = symbols.map((s) => {
-        const runKey = `${s.SYMBOL_LIGHTER}_${s.SYMBOL_EXTENDED}`;
-        const runKeyAlt = `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`;
-        const isRunning = running.includes(runKey) || running.includes(runKeyAlt);
+        const actualL = stripVenueSymbol(s.SYM_VENUE1);
+        const actualE = stripVenueSymbol(s.SYM_VENUE2);
+        let sessionSymL = actualL;
+        let sessionSymE = actualE;
+        const venueType1 = getAccountType(s.ACC_V1) || s.VENUE1 || "";
+        const venueType2 = getAccountType(s.ACC_V2) || s.VENUE2 || "";
+        if (isVenueLight(venueType1) && isVenueExtended(venueType2)) {
+            sessionSymL = actualL;
+            sessionSymE = actualE;
+        } else if (isVenueExtended(venueType1) && isVenueLight(venueType2)) {
+            sessionSymL = actualE;
+            sessionSymE = actualL;
+        }
+        const displayL = s.ACC_V1 ? `${s.ACC_V1}:${s.SYM_VENUE1}` : s.SYM_VENUE1;
+        const displayE = s.ACC_V2 ? `${s.ACC_V2}:${s.SYM_VENUE2}` : s.SYM_VENUE2;
+        const displayName = s.name || `${s.SYM_VENUE1}-${s.SYM_VENUE2}`;
+        const configId = findConfigId(s.SYM_VENUE1, s.SYM_VENUE2);
+        const candidateId = configId || s.id;
+        const displayId = candidateId && ID_PATTERN.test(candidateId) ? candidateId : undefined;
+        const runKey = `${sessionSymL}_${sessionSymE}`;
+        const runKeyAlt = `${sessionSymL}:${sessionSymE}`;
+        const runKeyTmux = `bot_L_${sessionSymL}__E_${sessionSymE}`;
+        const runKeyTmuxNoPrefix = runKeyTmux.replace(/^bot_/, "");
+        const runKeySwap = `${sessionSymE}_${sessionSymL}`;
+        const runKeySwapAlt = `${sessionSymE}:${sessionSymL}`;
+        const runKeySwapTmux = `bot_L_${sessionSymE}__E_${sessionSymL}`;
+        const runKeySwapTmuxNoPrefix = runKeySwapTmux.replace(/^bot_/, "");
+        const isRunning =
+            running.includes(runKey) ||
+            running.includes(runKeyAlt) ||
+            running.includes(runKeyTmux) ||
+            running.includes(runKeyTmuxNoPrefix) ||
+            running.includes(runKeySwap) ||
+            running.includes(runKeySwapAlt) ||
+            running.includes(runKeySwapTmux) ||
+            running.includes(runKeySwapTmuxNoPrefix);
         return {
-            id: `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`,
-            name: `${s.SYMBOL_LIGHTER}/${s.SYMBOL_EXTENDED}`,
-            pair: `${s.SYMBOL_LIGHTER}/${s.SYMBOL_EXTENDED}`,
+            id: displayId || "",
+            pairId: `${s.SYM_VENUE1}:${s.SYM_VENUE2}`,
+            name: displayName,
+            pair: `${displayL}/${displayE}`,
+            botName: displayName,
             status: isRunning ? "running" : "stopped",
             profit24h: 0,
             trades24h: 0,
             cfg: s,
-            L: s.SYMBOL_LIGHTER,
-            E: s.SYMBOL_EXTENDED,
+            L: actualL,
+            E: actualE,
         };
     });
 
@@ -501,19 +671,38 @@ export default function App() {
 
     async function loadConfig() {
         try {
-      const [cfgRes, runRes] = await Promise.all([
+      const [cfgRes, runRes, accRes] = await Promise.all([
         fetch(`${API_BASE}/api/config`, { headers: authHeaders }),
         fetch(`${API_BASE}/api/symbols`, { headers: authHeaders }),
+        fetch(`${API_BASE}/api/accounts`, { headers: authHeaders }),
       ]);
       if (cfgRes.ok) {
         const cfg = await cfgRes.json();
-        setSymbols(cfg.symbols || []);
-        setConfigData(cfg);
+        const sanitized = Array.isArray(cfg.symbols) ? cfg.symbols.map((s: any) => sanitizeSymbol(s as SymbolCfg)) : [];
+        setSymbols(sanitized);
+        setConfigData({ ...(cfg || {}), symbols: sanitized });
       }
-            if (runRes.ok) {
-                const r = await runRes.json();
-                setRunning(r.running || []);
-            }
+      if (runRes.ok) {
+        const r = await runRes.json();
+        setRunning(r.running || []);
+      }
+      if (accRes.ok) {
+        const data = await accRes.json();
+        const list = Array.isArray(data?.accounts) ? data.accounts : [];
+        setAccounts(list);
+        const edits: Record<string, { type: string; values: Record<string, string>; originalName: string }> = {};
+        const editing: Record<string, boolean> = {};
+        const editNames: Record<string, string> = {};
+        list.forEach((a) => {
+            const key = accountKey(a.name, a.type || "LIGHTER");
+            edits[key] = { type: a.type || "LIGHTER", values: {}, originalName: a.name };
+            editing[key] = false;
+            editNames[key] = a.name;
+        });
+        setAccountEdits(edits);
+        setEditingAccounts(editing);
+        setEditingNames(editNames);
+      }
         } catch {
             setMsg("Failed to load config");
         }
@@ -524,7 +713,9 @@ export default function App() {
         action: "start" | "stop",
         opts?: { skipReload?: boolean; silentMsg?: boolean }
     ) {
-        const url = `${API_BASE}/api/${action}?symbolL=${pair.SYMBOL_LIGHTER}&symbolE=${pair.SYMBOL_EXTENDED}`;
+    const url = `${API_BASE}/api/${action}?symbolL=${stripVenueSymbol(pair.SYM_VENUE1)}&symbolE=${stripVenueSymbol(
+        pair.SYM_VENUE2
+    )}`;
         try {
             await fetch(url, { method: "POST", headers: authHeaders });
             if (!opts?.skipReload) {
@@ -541,7 +732,7 @@ export default function App() {
     }
 
     async function removeBot(pair: SymbolCfg) {
-        if (!window.confirm(`Delete ${pair.SYMBOL_LIGHTER}/${pair.SYMBOL_EXTENDED}?`)) {
+        if (!window.confirm(`Delete ${pair.SYM_VENUE1}/${pair.SYM_VENUE2}?`)) {
             return;
         }
         try {
@@ -551,11 +742,11 @@ export default function App() {
                 return;
             }
             const cfg = await cfgRes.json();
-            const currentSymbols: SymbolCfg[] = Array.isArray(cfg?.symbols) ? cfg.symbols : [];
+            const currentSymbols: SymbolCfg[] = Array.isArray(cfg?.symbols) ? cfg.symbols.map((s: any) => sanitizeSymbol(s as SymbolCfg)) : [];
             const nextSymbols = currentSymbols.filter(
                 (sym) =>
                     !(
-                        sym.SYMBOL_LIGHTER === pair.SYMBOL_LIGHTER && sym.SYMBOL_EXTENDED === pair.SYMBOL_EXTENDED
+                        sym.SYM_VENUE1 === pair.SYM_VENUE1 && sym.SYM_VENUE2 === pair.SYM_VENUE2
                     )
             );
             if (nextSymbols.length === currentSymbols.length) {
@@ -575,10 +766,12 @@ export default function App() {
             setSymbols(nextSymbols);
             setPinnedBots((prev) => {
                 const next = { ...prev };
-                delete next[`${pair.SYMBOL_LIGHTER}:${pair.SYMBOL_EXTENDED}`];
+                delete next[`${pair.SYM_VENUE1}:${pair.SYM_VENUE2}`];
                 return next;
             });
-            if (selectedPair && selectedPair.L === pair.SYMBOL_LIGHTER && selectedPair.E === pair.SYMBOL_EXTENDED) {
+            const actualL = stripVenueSymbol(pair.SYM_VENUE1);
+            const actualE = stripVenueSymbol(pair.SYM_VENUE2);
+            if (selectedPair && selectedPair.L === actualL && selectedPair.E === actualE) {
                 setSelectedPair(null);
                 localStorage.removeItem("selectedPair");
                 localStorage.removeItem("selectedTab");
@@ -762,13 +955,144 @@ export default function App() {
         setCreateError("");
     }
 
+    async function fetchAccounts() {
+        try {
+            const res = await fetch(`${API_BASE}/api/accounts`, { headers: authHeaders });
+            if (res.ok) {
+                const data = await res.json();
+                const list = Array.isArray(data?.accounts) ? data.accounts : [];
+                setAccounts(list);
+                const edits: Record<string, { type: string; values: Record<string, string>; originalName: string }> = {};
+                const editing: Record<string, boolean> = {};
+                const editNames: Record<string, string> = {};
+                list.forEach((a) => {
+                    const key = accountKey(a.name, a.type || "LIGHTER");
+                    edits[key] = { type: a.type || "LIGHTER", values: {}, originalName: a.name };
+                    editing[key] = false;
+                    editNames[key] = a.name;
+                });
+                setAccountEdits(edits);
+                setEditingAccounts(editing);
+                setEditingNames(editNames);
+                setAccountPendingRemoval(null);
+            }
+        } catch {
+            // ignore fetch errors here; shown elsewhere
+        }
+    }
+
+    async function addAccount() {
+        setAccountError("");
+        const name = newAccount.name.trim();
+        const type = (newAccount.type || "LIGHTER").trim();
+        if (!name) {
+            setAccountError("Account name is required");
+            return;
+        }
+        const payload = {
+            name,
+            type,
+            values: {},
+        };
+        try {
+            setAccountSaving(true);
+            const res = await fetch(`${API_BASE}/api/accounts`, {
+                method: "POST",
+                headers: { ...authHeaders, "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || "Failed to save account");
+            }
+            await fetchAccounts();
+            setNewAccount({ name: "", type: "LIGHTER" });
+        } catch (err: any) {
+            setAccountError(err?.message || "Failed to save account");
+        } finally {
+            setAccountSaving(false);
+        }
+    }
+
+    async function removeAccount(name: string, type: string) {
+        try {
+            await fetch(`${API_BASE}/api/accounts/${encodeURIComponent(name)}?acc_type=${encodeURIComponent(type)}`, {
+                method: "DELETE",
+                headers: authHeaders,
+            });
+            await fetchAccounts();
+            setAccountPendingRemoval(null);
+        } catch {
+            // silent
+        }
+    }
+
+    function updateAccountEdit(key: string, type: string | null, values: Record<string, string> | null) {
+        setAccountEdits((prev) => {
+            const next = { ...prev };
+            const baseName = key.includes("::") ? key.split("::")[0] : key;
+            const current = next[key] || { type: type || "LIGHTER", values: {}, originalName: baseName };
+            next[key] = {
+                type: current.type,
+                originalName: current.originalName,
+                values: values ? { ...values } : current.values,
+            };
+            return next;
+        });
+    }
+
+    async function saveAccount(key: string) {
+        const edit = accountEdits[key];
+        if (!edit) return;
+        const originalName = edit.originalName;
+        const newNameRaw = editingNames[key] || originalName;
+        const newName = newNameRaw.replace(/\s+/g, "_");
+        const payload = { name: newName, type: edit.type, values: edit.values };
+        try {
+            setAccountSaving(true);
+            const res = await fetch(`${API_BASE}/api/accounts`, {
+                method: "POST",
+                headers: { ...authHeaders, "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || "Failed to save account");
+            }
+            if (newName !== originalName) {
+                try {
+                    await fetch(
+                        `${API_BASE}/api/accounts/${encodeURIComponent(originalName)}?acc_type=${encodeURIComponent(edit.type)}`,
+                        {
+                            method: "DELETE",
+                            headers: authHeaders,
+                        }
+                    );
+                } catch {
+                    // ignore cleanup failures
+                }
+            }
+            await fetchAccounts();
+            setEditingAccounts((prev) => ({ ...prev, [key]: false }));
+            setEditingNames((prev) => {
+                const next = { ...prev };
+                delete next[key];
+                return next;
+            });
+        } catch (err: any) {
+            setAccountError(err?.message || "Failed to save account");
+        } finally {
+            setAccountSaving(false);
+        }
+    }
+
     async function handleCreateBot() {
-        const newEntry = normalizeBotEntry(createDraft);
-        if (!newEntry?.SYMBOL_LIGHTER || !newEntry?.SYMBOL_EXTENDED) {
+        const newEntry = normalizeBotEntry(createDraft, getAccountType);
+        if (!newEntry?.SYM_VENUE1 || !newEntry?.SYM_VENUE2) {
             setCreateError("Symbol fields are required");
             return;
         }
-        if (symbols.some((s) => s.SYMBOL_LIGHTER === newEntry.SYMBOL_LIGHTER && s.SYMBOL_EXTENDED === newEntry.SYMBOL_EXTENDED)) {
+        if (symbols.some((s) => s.SYM_VENUE1 === newEntry.SYM_VENUE1 && s.SYM_VENUE2 === newEntry.SYM_VENUE2)) {
             setCreateError("Pair already exists");
             return;
         }
@@ -784,8 +1108,11 @@ export default function App() {
                 const text = await postRes.text();
                 throw new Error(text || "Failed to save new bot");
             }
+            const sanitizedNew = sanitizeSymbol(newEntry as SymbolCfg);
             const data = await postRes.json();
-            const updatedSymbols = Array.isArray(data?.symbols) ? data.symbols : [...symbols, newEntry];
+            const updatedSymbols = Array.isArray(data?.symbols)
+                ? data.symbols.map((s: any) => sanitizeSymbol(s as SymbolCfg))
+                : [...symbols, sanitizedNew];
             setSymbols(updatedSymbols);
             setMsg("Bot created");
             resetCreateDraft();
@@ -816,12 +1143,12 @@ export default function App() {
                 if (!clean) return;
                 const parts = clean.split(/[,\s]+/).filter(Boolean);
                 if (parts.length < 2) {
-                    errors.push(`Line ${idx + 1}: expected SYMBOL_LIGHTER and SYMBOL_EXTENDED`);
+                    errors.push(`Line ${idx + 1}: expected SYM_VENUE1 and SYM_VENUE2`);
                     return;
                 }
                 const entry: Partial<CreateBotDraft> = {
-                    SYMBOL_LIGHTER: parts[0],
-                    SYMBOL_EXTENDED: parts[1],
+                    SYM_VENUE1: parts[0],
+                    SYM_VENUE2: parts[1],
                 };
                 if (parts[2]) entry.MIN_SPREAD = Number(parts[2]);
                 if (parts[3]) entry.SPREAD_TP = Number(parts[3]);
@@ -846,12 +1173,12 @@ export default function App() {
             return;
         }
         setBulkSaving(true);
-        const currentKeys = new Set(symbols.map((s) => `${s.SYMBOL_LIGHTER}:${s.SYMBOL_EXTENDED}`));
+        const currentKeys = new Set(symbols.map((s) => `${s.SYM_VENUE1}:${s.SYM_VENUE2}`));
         const created: SymbolCfg[] = [];
         const skippedExisting: string[] = [];
         const failed: string[] = [];
         for (const entry of bulkPreview.readyEntries) {
-            const key = `${entry.SYMBOL_LIGHTER}:${entry.SYMBOL_EXTENDED}`;
+            const key = `${entry.SYM_VENUE1}:${entry.SYM_VENUE2}`;
             if (currentKeys.has(key)) {
                 skippedExisting.push(key);
                 continue;
@@ -866,14 +1193,14 @@ export default function App() {
                     const text = await postRes.text();
                     throw new Error(text || "Failed to save bot");
                 }
-                created.push(entry);
+                created.push(sanitizeSymbol(entry as SymbolCfg));
                 currentKeys.add(key);
             } catch (err: any) {
                 failed.push(`${key}${err?.message ? ` (${err.message})` : ""}`);
             }
         }
         if (created.length) {
-            setSymbols((prev) => [...prev, ...created]);
+            setSymbols((prev) => [...prev, ...created.map((s) => sanitizeSymbol(s))]);
         }
         const summaryParts = [];
         if (created.length) summaryParts.push(`Created ${created.length}`);
@@ -887,7 +1214,7 @@ export default function App() {
         }
         const lines: string[] = [];
         if (created.length) {
-            lines.push(`Created: ${created.map((c) => `${c.SYMBOL_LIGHTER}/${c.SYMBOL_EXTENDED}`).join(", ")}`);
+            lines.push(`Created: ${created.map((c) => `${c.SYM_VENUE1}/${c.SYM_VENUE2}`).join(", ")}`);
         }
         const previewExisting = Array.from(
             new Set(
@@ -946,7 +1273,7 @@ export default function App() {
   function handleBulkEditDialogChange(open: boolean) {
     setBulkEditOpen(open);
     if (open) {
-      setBulkEditRows(symbols.map((s) => ({ ...s })));
+      setBulkEditRows(symbols.map((s) => sanitizeSymbol(s)));
       setBulkEditError("");
     } else {
       setBulkEditError("");
@@ -963,12 +1290,23 @@ export default function App() {
     );
   }
 
+  function removeBulkEditRow(idx: number) {
+    setBulkEditRows((rows) => rows.filter((_, i) => i !== idx));
+  }
+
   async function saveBulkEdit() {
     setBulkEditError("");
     setBulkEditSaving(true);
     try {
       const numericKeys = BULK_NUMERIC_COLS;
       const boolKeys = BULK_BOOL_COLS;
+      const sanitize = (row: SymbolCfg): SymbolCfg => {
+        const { L, E, ...rest } = row as any;
+        if (!rest.id) {
+          (rest as any).id = randomId();
+        }
+        return rest as SymbolCfg;
+      };
       const cleaned = bulkEditRows.map((row) => {
         const next: any = { ...row };
         numericKeys.forEach((k) => {
@@ -983,7 +1321,7 @@ export default function App() {
         boolKeys.forEach((k) => {
           next[k] = Boolean((row as any)[k]);
         });
-        return next as SymbolCfg;
+        return sanitizeSymbol(next as SymbolCfg);
       });
       const cfgPayload = { ...(configData || {}), symbols: cleaned };
       const res = await fetch(`${API_BASE}/api/config`, {
@@ -1046,13 +1384,13 @@ export default function App() {
         );
     }
 
-    function togglePin(botId: string) {
+    function togglePin(pairId: string) {
         setPinnedBots((prev) => {
             const next = { ...prev };
-            if (next[botId]) {
-                delete next[botId];
+            if (next[pairId]) {
+                delete next[pairId];
             } else {
-                next[botId] = Date.now();
+                next[pairId] = Date.now();
             }
             return next;
         });
@@ -1064,10 +1402,10 @@ export default function App() {
         return haystack.includes(searchTerm.toLowerCase());
     });
     const pinnedList = filteredBots
-        .filter((b) => pinnedBots[b.id])
-        .sort((a, b) => (pinnedBots[a.id] || 0) - (pinnedBots[b.id] || 0));
+        .filter((b) => pinnedBots[b.pairId])
+        .sort((a, b) => (pinnedBots[a.pairId] || 0) - (pinnedBots[b.pairId] || 0));
     const unpinnedList = filteredBots
-        .filter((b) => !pinnedBots[b.id])
+        .filter((b) => !pinnedBots[b.pairId])
         .sort((a, b) => {
             if (a.status !== b.status) {
                 return a.status === "running" ? -1 : 1;
@@ -1079,8 +1417,8 @@ export default function App() {
     const visibleCount = (showPinned ? pinnedList.length : 0) + (showOther ? unpinnedList.length : 0);
 
     const selected = selectedPair ? bots.find((p) => p.L === selectedPair.L && p.E === selectedPair.E) || null : null;
-    const headerTitle = selected ? selected.L || selected.name : "QUANTING.FUN";
-    const headerSubtitle = selected ? selected.E || selected.pair : "";
+    const headerTitle = "QUANTING.FUN";
+    const headerSubtitle = "";
 
     return (
         <>
@@ -1088,100 +1426,86 @@ export default function App() {
                 <header className="bg-slate-900/80 backdrop-blur-xl border-b border-slate-800/50 sticky top-0 z-10">
                     <div className="px-4 sm:px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 relative">
                         <div className="flex items-center gap-3">
-                            {selected && (
-                                <button
-                                    onClick={() => {
-                                        setSelectedPair(null);
-                                        localStorage.removeItem("selectedPair");
-                                        localStorage.removeItem("selectedTab");
-                                    }}
-                                    className="p-2 hover:bg-slate-800/50 rounded-lg transition-all text-slate-400 hover:text-white"
-                                >
-                                    <ArrowLeft className="w-5 h-5" />
-                                </button>
-                            )}
                             <div>
                                 <h1 className="text-white text-2xl font-semibold">{headerTitle}</h1>
                                 {headerSubtitle && <p className="text-slate-400 text-sm mt-1">{headerSubtitle}</p>}
                             </div>
                         </div>
-                        {!selected && (
-                            <div className="flex flex-col gap-3 w-full">
-                                <div className="md:flex md:items-center md:gap-6">
-                                    <div className="w-full md:flex-none md:order-2 md:ml-auto md:w-auto">
-                                        <div className="w-full md:w-auto md:min-w-[360px]">
-                                            <div className="grid grid-cols-4 gap-1.5 w-full">
-                                                <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 text-center sm:text-left h-[70px] min-h-[70px] md:h-[90px] md:min-h-[90px] flex flex-col justify-center min-w-0">
-                                                    <p className="text-slate-400 text-[9px] md:text-xs mb-0.5">Active Bots</p>
-                                                    <p className="text-white text-sm md:text-base">
-                                                        {activeBots}
-                                                        <span className="text-slate-500">/{bots.length}</span>
-                                                    </p>
-                                                </div>
-                                                {(["cpu", "memory", "disk"] as Array<keyof typeof serverMetricLabels>).map((metric) => {
-                                                    const summary = serverStatusSummary?.[metric];
-                                                    return (
-                                                        <div
-                                                            key={metric}
-                                                            className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 text-center sm:text-left h-[70px] min-h-[70px] md:h-[90px] md:min-h-[90px] flex flex-col justify-center min-w-0"
-                                                        >
-                                                            <p className="text-slate-400 text-[9px] md:text-xs mb-0.5 text-center sm:text-left">{serverMetricLabels[metric]}</p>
-                                                            {summary ? (
-                                                                <>
-                                                                    <p className="text-white text-sm md:text-base text-center sm:text-left">{summary.percent}%</p>
-                                                                    <p className="text-slate-500 text-[9px] md:text-[11px] text-center sm:text-left">of {summary.capacity}</p>
-                                                                </>
-                                                            ) : (
-                                                                <p className="text-slate-500 text-[11px] text-center sm:text-left">{serverStatusError || "Loading..."}</p>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
+                        <div className="flex flex-col gap-3 w-full">
+                            <div className="md:flex md:items-center md:gap-6">
+                                <div className="w-full md:flex-none md:order-2 md:ml-auto md:w-auto">
+                                    <div className="w-full md:w-auto md:min-w-[360px]">
+                                        <div className="grid grid-cols-4 gap-1.5 w-full">
+                                            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 text-center sm:text-left h-[70px] min-h-[70px] md:h-[90px] md:min-h-[90px] flex flex-col justify-center min-w-0">
+                                                <p className="text-slate-400 text-[9px] md:text-xs mb-0.5">Active Bots</p>
+                                                <p className="text-white text-sm md:text-base">
+                                                    {activeBots}
+                                                    <span className="text-slate-500">/{bots.length}</span>
+                                                </p>
                                             </div>
+                                            {(["cpu", "memory", "disk"] as Array<keyof typeof serverMetricLabels>).map((metric) => {
+                                                const summary = serverStatusSummary?.[metric];
+                                                return (
+                                                    <div
+                                                        key={metric}
+                                                        className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl px-2 py-1 text-center sm:text-left h-[70px] min-h-[70px] md:h-[90px] md:min-h-[90px] flex flex-col justify-center min-w-0"
+                                                    >
+                                                        <p className="text-slate-400 text-[9px] md:text-xs mb-0.5 text-center sm:text-left">{serverMetricLabels[metric]}</p>
+                                                        {summary ? (
+                                                            <>
+                                                                <p className="text-white text-sm md:text-base text-center sm:text-left">{summary.percent}%</p>
+                                                                <p className="text-slate-500 text-[9px] md:text-[11px] text-center sm:text-left">of {summary.capacity}</p>
+                                                            </>
+                                                        ) : (
+                                                            <p className="text-slate-500 text-[11px] text-center sm:text-left">{serverStatusError || "Loading..."}</p>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     </div>
-                                    <div className="flex flex-wrap gap-2 w-full md:w-auto md:flex-1 md:order-1 md:justify-center md:ml-0 mt-4 md:mt-0 md:absolute md:left-1/2 md:-translate-x-1/2 md:top-1/2 md:-translate-y-1/2 md:w-auto">
+                                </div>
+                                <div className="flex flex-wrap gap-2 w-full md:w-auto md:flex-1 md:order-1 md:justify-center md:ml-0 mt-4 md:mt-0 md:absolute md:left-1/2 md:-translate-x-1/2 md:top-1/2 md:-translate-y-1/2 md:w-auto">
+                                    <button
+                                        onClick={() => handleNav("dashboard")}
+                                        className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "dashboard"
+                                                ? "border-blue-500 text-white bg-blue-600/40"
+                                                : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                                            }`}
+                                    >
+                                        <Activity className="w-4 h-4" />
+                                        <span className="hidden xl:inline">Dashboard</span>
+                                    </button>
+                                    <button
+                                        onClick={() => handleNav("activities")}
+                                        className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "activities"
+                                                ? "border-blue-500 text-white bg-blue-600/40"
+                                                : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                                            }`}
+                                    >
+                                        <TrendingUp className="w-4 h-4" />
+                                        <span className="hidden xl:inline">Activities</span>
+                                    </button>
                                         <button
-                                            onClick={() => setActiveTab("dashboard")}
-                                            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "dashboard"
-                                                    ? "border-blue-500 text-white bg-blue-600/40"
-                                                    : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
-                                                }`}
-                                        >
-                                            <Activity className="w-4 h-4" />
-                                            <span className="hidden xl:inline">Dashboard</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setActiveTab("trades")}
-                                            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "trades"
-                                                    ? "border-blue-500 text-white bg-blue-600/40"
-                                                    : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
-                                                }`}
-                                        >
-                                            <TrendingUp className="w-4 h-4" />
-                                            <span className="hidden xl:inline">Trades</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setActiveTab("settings")}
+                                            onClick={() => handleNav("settings")}
                                             className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "settings"
                                                     ? "border-blue-500 text-white bg-blue-600/40"
                                                     : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
                                                 }`}
                                         >
                                             <SettingsIcon className="w-4 h-4" />
-                                            <span className="hidden xl:inline">Settings</span>
+                                            <span className="hidden xl:inline">Accounts</span>
                                         </button>
-                                        <button
-                                            onClick={logout}
-                                            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border border-slate-700 text-slate-200 bg-slate-900/50 hover:bg-slate-800/50 transition-all"
-                                        >
-                                            <LogOut className="w-4 h-4" />
-                                            <span className="hidden xl:inline">Logout</span>
-                                        </button>
-                                    </div>
+                                    <button
+                                        onClick={logout}
+                                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border border-slate-700 text-slate-200 bg-slate-900/50 hover:bg-slate-800/50 transition-all"
+                                    >
+                                        <LogOut className="w-4 h-4" />
+                                        <span className="hidden xl:inline">Logout</span>
+                                    </button>
                                 </div>
                             </div>
-                        )}
+                        </div>
                     </div>
                 </header>
 
@@ -1292,8 +1616,9 @@ export default function App() {
                                                 <DialogTitle>Bulk add bots</DialogTitle>
                                                 <DialogDescription>
                                                     Paste JSON (array of configs) or write one pair per line as
-                                                    <code className="px-1">SYMBOL_LIGHTER SYMBOL_EXTENDED [MIN_SPREAD] [SPREAD_TP] [MIN_HITS]</code>. The preview
-                                                    highlights duplicates, conflicts, and invalid rows before you submit.
+                                                    <code className="px-1">SYM_VENUE1 SYM_VENUE2 [MIN_SPREAD] [SPREAD_TP] [MIN_HITS]</code>. When using JSON, include
+                                                    <code className="px-1">ACC_V1</code> and <code className="px-1">ACC_V2</code> if you want to bind the pair to
+                                                    specific accounts. The preview highlights duplicates, conflicts, and invalid rows before you submit.
                                                 </DialogDescription>
                                             </DialogHeader>
                                             <div className="space-y-4">
@@ -1386,69 +1711,120 @@ export default function App() {
                                         </DialogContent>
                                     </Dialog>
                                     <Dialog open={bulkEditOpen} onOpenChange={handleBulkEditDialogChange}>
-                                        <DialogContent className="max-w-5xl">
+                                        <DialogContent className="max-w-6xl w-[90vw] max-h-[75vh]">
                                             <DialogHeader>
                                                 <DialogTitle>Bulk edit bots</DialogTitle>
                                                 <DialogDescription>Edit existing bot settings in a table, then save to update config.json.</DialogDescription>
                                             </DialogHeader>
-                                            <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 relative">
-                                                <table className="w-full text-xs table-mono">
-                                            <thead className="bg-slate-900">
-                                                <tr>
-                                                    {["L", "E", ...BULK_NUMERIC_COLS, ...BULK_BOOL_COLS].map((col) => {
-                                                        const sticky = col === "L" ? "sticky left-0 bg-slate-900/95 z-10 min-w-[120px]" : "";
-                                                        const extraClass = col === "E" ? "min-w-[150px]" : "";
-                                                        return (
-                                                            <th
-                                                                key={col}
-                                                                className={`px-2 py-2 text-left text-slate-300 whitespace-nowrap ${sticky} ${extraClass}`}
-                                                            >
-                                                                {col.replace("_", " ")}
-                                                            </th>
-                                                        );
-                                                    })}
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {bulkEditRows.map((row, idx) => (
-                                                    <tr key={`${row.SYMBOL_LIGHTER}-${row.SYMBOL_EXTENDED}-${idx}`} className="border-t border-slate-800">
-                                                        <td className="px-2 py-1 sticky left-0 bg-slate-950 border-r border-slate-800 z-20">
+                                        <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 relative max-h-[55vh] overflow-y-auto">
+                                            <table className="w-full text-xs table-mono">
+                                                <thead className="bg-slate-900">
+                                                    <tr>
+                                                        {(["name", "ACC_V1", "SYM_VENUE1", "ACC_V2", "SYM_VENUE2", ...BULK_NUMERIC_COLS, ...BULK_BOOL_COLS, "actions"] as const).map((col, colIdx) => {
+                                                            const sticky = colIdx === 0 ? "sticky left-0 bg-slate-900/95 z-10 min-w-[160px]" : "";
+                                                            const extraClass =
+                                                                ["ACC_V1", "ACC_V2", "SYM_VENUE1", "SYM_VENUE2"].includes(col) ? "min-w-[170px]" : "min-w-[120px]";
+                                                            const label =
+                                                                col === "name"
+                                                                    ? "NAME"
+                                                                    : col === "actions"
+                                                                    ? "ACTIONS"
+                                                                    : col.replace("_", " ");
+                                                            return (
+                                                                <th
+                                                                    key={col}
+                                                                    className={`px-2 py-2 text-left text-slate-300 whitespace-nowrap ${sticky} ${extraClass}`}
+                                                                >
+                                                                    {label}
+                                                                </th>
+                                                            );
+                                                        })}
+                                                    </tr>
+                                                </thead>
+                                                    <tbody>
+                                                        {bulkEditRows.map((row, idx) => (
+                                                            <tr key={`${row.SYM_VENUE1}-${row.SYM_VENUE2}-${idx}`} className="border-t border-slate-800">
+                                                                <td className="px-2 py-1 sticky left-0 bg-slate-950 border-r border-slate-800 z-20">
                                                                     <input
-                                                                value={row.SYMBOL_LIGHTER}
-                                                                onChange={(e) => updateBulkEditRow(idx, "SYMBOL_LIGHTER", e.target.value)}
-                                                                className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
-                                                            />
-                                                        </td>
-                                                        <td className="px-2 py-1">
-                                                            <input
-                                                                value={row.SYMBOL_EXTENDED}
-                                                                onChange={(e) => updateBulkEditRow(idx, "SYMBOL_EXTENDED", e.target.value)}
-                                                                className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
-                                                            />
-                                                        </td>
-                                                        {BULK_NUMERIC_COLS.map((key) => (
-                                                            <td key={String(key)} className="px-2 py-1">
-                                                                <input
-                                                                    value={(row as any)[key] ?? ""}
-                                                                    onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.value)}
-                                                                    className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
-                                                                />
-                                                            </td>
-                                                        ))}
-                                                        {BULK_BOOL_COLS.map((key) => (
-                                                            <td key={key} className="px-2 py-1 text-center">
-                                                                <input
-                                                                    type="checkbox"
-                                                                    checked={Boolean((row as any)[key])}
-                                                                    onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.checked)}
+                                                                        value={row.name || ""}
+                                                                        onChange={(e) => updateBulkEditRow(idx, "name", e.target.value)}
+                                                                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                                                                    />
+                                                                </td>
+                                                                <td className="px-2 py-1">
+                                                                    <select
+                                                                        value={row.ACC_V1 || ""}
+                                                                        onChange={(e) => updateBulkEditRow(idx, "ACC_V1", e.target.value)}
+                                                                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                                                                    >
+                                                                        <option value="">Select account</option>
+                                                                        {accounts.map((opt) => (
+                                                                            <option key={`${opt.name}-${opt.type}`} value={opt.name}>
+                                                                                {opt.name} ({opt.type})
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                </td>
+                                                                <td className="px-2 py-1">
+                                                                    <input
+                                                                        value={row.SYM_VENUE1}
+                                                                        onChange={(e) => updateBulkEditRow(idx, "SYM_VENUE1", e.target.value)}
+                                                                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                                                                    />
+                                                                </td>
+                                                                <td className="px-2 py-1">
+                                                                    <select
+                                                                        value={row.ACC_V2 || ""}
+                                                                        onChange={(e) => updateBulkEditRow(idx, "ACC_V2", e.target.value)}
+                                                                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                                                                    >
+                                                                        <option value="">Select account</option>
+                                                                        {accounts.map((opt) => (
+                                                                            <option key={`${opt.name}-${opt.type}`} value={opt.name}>
+                                                                                {opt.name} ({opt.type})
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                </td>
+                                                                <td className="px-2 py-1">
+                                                                    <input
+                                                                        value={row.SYM_VENUE2}
+                                                                        onChange={(e) => updateBulkEditRow(idx, "SYM_VENUE2", e.target.value)}
+                                                                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                                                                    />
+                                                                </td>
+                                                                {BULK_NUMERIC_COLS.map((key) => (
+                                                                    <td key={String(key)} className="px-2 py-1">
+                                                                        <input
+                                                                            value={(row as any)[key] ?? ""}
+                                                                            onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.value)}
+                                                                            className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-white text-xs"
                                                                         />
                                                                     </td>
                                                                 ))}
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
+                                                               {BULK_BOOL_COLS.map((key) => (
+                                                                   <td key={key} className="px-2 py-1 text-center">
+                                                                       <input
+                                                                           type="checkbox"
+                                                                           checked={Boolean((row as any)[key])}
+                                                                           onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.checked)}
+                                                                       />
+                                                                   </td>
+                                                               ))}
+                                                                <td className="px-2 py-1 text-right">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => removeBulkEditRow(idx)}
+                                                                        className="px-3 py-1 rounded-lg bg-red-600 text-white text-[11px] hover:bg-red-500 transition"
+                                                                    >
+                                                                        Delete
+                                                                    </button>
+                                                                </td>
+                                                           </tr>
+                                                       ))}
+                                                   </tbody>
+                                               </table>
+                                           </div>
                                             {bulkEditError && <p className="text-sm text-red-400">{bulkEditError}</p>}
                                             <DialogFooter>
                                                 <button
@@ -1481,9 +1857,10 @@ export default function App() {
                                     {showPinned &&
                                         pinnedList.map((bot) => (
                                             <BotCard
-                                                key={bot.id}
+                                                key={bot.pairId}
                                                 bot={{
                                                     id: bot.id,
+                                                    pairId: bot.pairId,
                                                     name: bot.name,
                                                     status: bot.status,
                                                     pair: bot.pair,
@@ -1493,7 +1870,7 @@ export default function App() {
                                                     trades24h: bot.trades24h,
                                                 }}
                                                 pinned
-                                                onPin={() => togglePin(bot.id)}
+                                                onPin={() => togglePin(bot.pairId)}
                                                 onToggle={() => startStop(bot.cfg, bot.status === "running" ? "stop" : "start")}
                                                 onView={() => {
                                                     setSelectedPair({ L: bot.L, E: bot.E });
@@ -1514,9 +1891,10 @@ export default function App() {
                                     {showOther &&
                                         unpinnedList.map((bot) => (
                                             <BotCard
-                                                key={bot.id}
+                                                key={bot.pairId}
                                                 bot={{
                                                     id: bot.id,
+                                                    pairId: bot.pairId,
                                                     name: bot.name,
                                                     status: bot.status,
                                                     pair: bot.pair,
@@ -1526,7 +1904,7 @@ export default function App() {
                                                     trades24h: bot.trades24h,
                                                 }}
                                                 pinned={false}
-                                                onPin={() => togglePin(bot.id)}
+                                                onPin={() => togglePin(bot.pairId)}
                                                 onToggle={() => startStop(bot.cfg, bot.status === "running" ? "stop" : "start")}
                                                 onView={() => {
                                                     setSelectedPair({ L: bot.L, E: bot.E });
@@ -1545,21 +1923,179 @@ export default function App() {
                             </div>
                         )}
 
-                        {!selected && activeTab === "trades" && (
-                            <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 rounded-xl p-6 shadow-xl">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div>
-                                        <h2 className="text-white text-lg">Latest Trades (all bots)</h2>
-                                        <p className="text-slate-400 text-sm">Aggregated recent trades across every configured pair.</p>
-                                    </div>
-                                </div>
-              <LatestTrades apiBase={API_BASE} authHeaders={authHeaders} mode={dataMode} onModeChange={setDataMode} />
-            </div>
-          )}
+                        {!selected && activeTab === "activities" && (
+                            <ActivitiesOverview apiBase={API_BASE} authHeaders={authHeaders} mode={dataMode} />
+                        )}
 
                         {!selected && activeTab === "settings" && (
-                            <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 rounded-xl p-6 shadow-xl">
-                                <SettingsPanel envLines={envLines} onChange={updateEnvValue} onSave={saveEnv} onReset={fetchEnv} />
+                            <div className="space-y-4">
+                                <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 rounded-xl p-6 shadow-xl">
+                                    <h3 className="text-white text-lg mb-3">Accounts</h3>
+                                    <div className="flex flex-wrap gap-3 items-end">
+                                        <div className="flex-1 min-w-[220px]">
+                                            <label className="text-xs text-slate-400">Account Name</label>
+                                            <input
+                                                value={newAccount.name}
+                                                onChange={(e) => setNewAccount({ ...newAccount, name: e.target.value })}
+                                                autoComplete="new-password"
+                                                data-lpignore="true"
+                                                className="w-full px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                                placeholder="e.g., LIGHTER_MAIN"
+                                            />
+                                        </div>
+                                        <div className="w-48">
+                                            <label className="text-xs text-slate-400">Venue Type</label>
+                                            <select
+                                                value={newAccount.type}
+                                                onChange={(e) => setNewAccount({ ...newAccount, type: e.target.value })}
+                                                className="w-full px-3 py-2 pr-10 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 appearance-none"
+                                                >
+                                                {["LIGHTER", "EXTENDED", "HYPERLIQUID"].map((opt) => (
+                                                    <option key={opt} value={opt}>
+                                                        {opt}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <button
+                                            onClick={addAccount}
+                                            className="px-4 py-2 h-10 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition disabled:opacity-60"
+                                            disabled={accountSaving}
+                                            type="button"
+                                        >
+                                            {accountSaving ? "Saving..." : "Add Account"}
+                                        </button>
+                                    </div>
+                                    {accountError && <p className="text-sm text-red-400 mt-2">{accountError}</p>}
+                                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                        {accounts.map((acc) => {
+                                            const key = accountKey(acc.name, acc.type || "LIGHTER");
+                                            const edit = accountEdits[key] || { type: acc.type || "LIGHTER", values: {}, originalName: acc.name };
+                                            const fields = ACCOUNT_FIELDS[edit.type] || [];
+                                            const isEditing = editingAccounts[key];
+                                            return (
+                                                <div key={acc.name} className="border border-slate-800 rounded-lg p-3 bg-slate-950/60 flex flex-col gap-2">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className="flex-1 min-w-[120px]">
+                                                            {isEditing ? (
+                                                                <>
+                                                                    <label className="text-xs text-slate-400">Account Name</label>
+                                                        <input
+                                                            value={editingNames[key] ?? acc.name}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value.replace(/\s+/g, "_");
+                                                                setEditingNames((prev) => ({ ...prev, [key]: val }));
+                                                            }}
+                                                            autoComplete="new-password"
+                                                            data-lpignore="true"
+                                                            className="w-full px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                                        />
+                                                                    <p className="text-xs text-slate-500 mt-1">Type: {acc.type}</p>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <p className="text-white text-sm">{acc.name}</p>
+                                                                    <p className="text-xs text-slate-400">{acc.type}</p>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            {!accountPendingRemoval || accountPendingRemoval.name !== acc.name || accountPendingRemoval.type !== acc.type ? (
+                                                                <button
+                                                                    className="text-xs text-red-300 hover:text-red-200"
+                                                                    onClick={() => setAccountPendingRemoval({ name: acc.name, type: acc.type })}
+                                                                    type="button"
+                                                                >
+                                                                    Remove
+                                                                </button>
+                                                            ) : (
+                                                                <>
+                                                                    <button
+                                                                        className="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-500 transition"
+                                                                        onClick={() => removeAccount(acc.name, acc.type)}
+                                                                        type="button"
+                                                                    >
+                                                                        Confirm
+                                                                    </button>
+                                                                    <button
+                                                                        className="text-xs px-2 py-1 rounded border border-slate-700 text-slate-200 hover:bg-slate-800/60 transition"
+                                                                        onClick={() => setAccountPendingRemoval(null)}
+                                                                        type="button"
+                                                                    >
+                                                                        Cancel
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    {isEditing ? (
+                                                        <div className="grid grid-cols-1 gap-2">
+                                                            {fields.map((f) => (
+                                                                <div key={f}>
+                                                                    <label className="text-xs text-slate-400">{f}</label>
+                                                                    <input
+                                                                        value={edit.values?.[f] ?? ""}
+                                                                        onChange={(e) => {
+                                                                            const nextVals = { ...(edit.values || {}), [f]: e.target.value };
+                                                                            updateAccountEdit(key, edit.type, nextVals);
+                                                                        }}
+                                                                        autoComplete="new-password"
+                                                                        data-lpignore="true"
+                                                                        className="w-full px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                                                                    />
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-xs text-slate-500 italic">Click Edit to enter/update credentials.</div>
+                                                    )}
+                                                    <button
+                                                        className="mt-2 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-500 transition disabled:opacity-60"
+                                                        onClick={() => {
+                                                            if (isEditing) {
+                                                                saveAccount(key);
+                                                            } else {
+                                                                setEditingAccounts((prev) => ({ ...prev, [key]: true }));
+                                                            }
+                                                        }}
+                                                        disabled={accountSaving}
+                                                        type="button"
+                                                    >
+                                                        {accountSaving && isEditing
+                                                            ? "Saving..."
+                                                            : isEditing
+                                                            ? "Save Account"
+                                                            : "Edit"}
+                                                    </button>
+                                                    {isEditing && (
+                                                        <button
+                                                            className="mt-1 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-200 text-sm hover:bg-slate-800/50 transition disabled:opacity-60"
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setEditingAccounts((prev) => ({ ...prev, [key]: false }));
+                                                                setEditingNames((prev) => {
+                                                                    const next = { ...prev };
+                                                                    delete next[key];
+                                                                    return next;
+                                                                });
+                                                                setAccountEdits((prev) => {
+                                                                    const next = { ...prev };
+                                                                    next[key] = { type: acc.type, values: {}, originalName: acc.name };
+                                                                    return next;
+                                                                });
+                                                            }}
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <div className="bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800/50 rounded-xl p-6 shadow-xl">
+                                    <SettingsPanel envLines={envLines} onChange={updateEnvValue} onSave={saveEnv} onReset={fetchEnv} />
+                                </div>
                             </div>
                         )}
 
@@ -1570,6 +2106,7 @@ export default function App() {
                                 authHeaders={authHeaders}
                                 mode={dataMode}
                                 onModeChange={setDataMode}
+                                accountOptions={accounts}
                                 onToggle={() => startStop(selected.cfg, selected.status === "running" ? "stop" : "start")}
                                 onDelete={() => removeBot(selected.cfg)}
                                 initialTab={initialDetailTab || "dashboard"}
@@ -1580,18 +2117,19 @@ export default function App() {
                                     // refresh config so header/cards reflect the new symbols
                                     setSymbols((prev) =>
                                         prev.map((s) =>
-                                            s.SYMBOL_LIGHTER === selected?.L && s.SYMBOL_EXTENDED === selected?.E
+                                            s.SYM_VENUE1 === selected?.L && s.SYM_VENUE2 === selected?.E
                                                 ? { ...s, ...draft }
                                                 : s
                                         )
                                     );
                                     loadConfig();
-                                    if (draft?.SYMBOL_LIGHTER && draft?.SYMBOL_EXTENDED) {
-                                        setSelectedPair({ L: draft.SYMBOL_LIGHTER, E: draft.SYMBOL_EXTENDED });
-                                        localStorage.setItem("selectedPair", JSON.stringify({ L: draft.SYMBOL_LIGHTER, E: draft.SYMBOL_EXTENDED }));
-                                        // immediately update header title/subtitle without waiting for reload
-                                        setSelectionRestored(false);
+                                    if (draft?.SYM_VENUE1 && draft?.SYM_VENUE2) {
+                                        const newL = stripVenueSymbol(draft.SYM_VENUE1);
+                                        const newE = stripVenueSymbol(draft.SYM_VENUE2);
+                                        setSelectedPair({ L: newL, E: newE });
+                                        localStorage.setItem("selectedPair", JSON.stringify({ L: newL, E: newE }));
                                     }
+                                    setSelectionRestored(false);
                                 }}
                                 onClose={() => {
                                     localStorage.removeItem("selectedPair");

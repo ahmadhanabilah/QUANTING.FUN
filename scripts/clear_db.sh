@@ -11,8 +11,8 @@ SKIP_PROMPT="false"
 usage() {
   cat <<'EOF'
 Usage: bash scripts/clear_db.sh --symbol TT:BTC:BTC-USD --yes
-Truncate decisions/trades/fills tables for the selected database(s).
-If --symbol is provided (e.g. TT:BTC:BTC-USD), only rows for that bot_name are deleted.
+Truncate the traces table for the selected database(s).
+If --symbol is provided (e.g. TT:BTC:BTC-USD), only rows for that bot_id are deleted.
 Reads DATABASE_URL / TEST_DATABASE_URL from .env_server.
 EOF
 }
@@ -56,12 +56,12 @@ if ! command -v psql >/dev/null 2>&1; then
   echo "psql is required on PATH"; exit 1
 fi
 
-if [[ "${SKIP_PROMPT}" != "true" ]]; then
-  if [[ -n "${SYMBOL_FILTER}" ]]; then
-    echo "This will DELETE rows for bot_name='${SYMBOL_FILTER}' in decisions/trades/fills for: ${targets[*]}"
-  else
-    echo "This will TRUNCATE decisions/trades/fills for: ${targets[*]}"
-  fi
+  if [[ "${SKIP_PROMPT}" != "true" ]]; then
+    if [[ -n "${SYMBOL_FILTER}" ]]; then
+      echo "This will DELETE rows for bot_id='${SYMBOL_FILTER}' in traces for: ${targets[*]}"
+    else
+      echo "This will TRUNCATE traces for: ${targets[*]}"
+    fi
   read -r -p "Type 'yes' to continue: " resp
   if [[ "${resp,,}" != "yes" ]]; then
     echo "Aborted."; exit 0
@@ -75,12 +75,12 @@ truncate_tables() {
     echo "[${label}] Skipped (DSN not set)"; return
   fi
   if [[ -n "${SYMBOL_FILTER}" ]]; then
-    echo "[${label}] Deleting rows for bot_name='${SYMBOL_FILTER}'..."
+    echo "[${label}] Deleting rows for bot_id='${SYMBOL_FILTER}'..."
     safe_symbol=$(printf "%s" "${SYMBOL_FILTER}" | sed "s/'/''/g")
-    PGPASSWORD="" psql "${dsn}" -c "delete from decisions where bot_name = '${safe_symbol}'; delete from trades where bot_name = '${safe_symbol}'; delete from fills where bot_name = '${safe_symbol}';" >/dev/null
+    PGPASSWORD="" psql "${dsn}" -c "delete from traces where bot_id = '${safe_symbol}';" >/dev/null
   else
     echo "[${label}] Truncating..."
-    PGPASSWORD="" psql "${dsn}" -c "truncate table decisions, trades, fills restart identity;" >/dev/null
+    PGPASSWORD="" psql "${dsn}" -c "truncate table traces restart identity;" >/dev/null
   fi
   echo "[${label}] Done."
 }

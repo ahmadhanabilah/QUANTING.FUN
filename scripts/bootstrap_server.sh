@@ -76,23 +76,6 @@ TEST_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5
 # UI / CORS
 CORS_ORIGINS=${CORS_ORIGINS}
 CORS_ORIGIN_REGEX=
-EOF
-fi
-
-if [ -f .env_bot ]; then
-  echo "[bootstrap] .env_bot exists; skipping overwrite"
-else
-  cat > .env_bot <<EOF
-# Lighter venue
-LIGHTER_API_PRIVATE_KEY=
-LIGHTER_ACCOUNT_INDEX=
-LIGHTER_API_KEY_INDEX=
-
-# Extended venue
-EXTENDED_VAULT_ID=
-EXTENDED_PRIVATE_KEY=
-EXTENDED_PUBLIC_KEY=
-EXTENDED_API_KEY=
 
 # Telegram (optional)
 TELEGRAM_BOT_TOKEN=
@@ -102,7 +85,39 @@ TELEGRAM_TOPIC_ID=
 # Watchdog
 DB_WATCHDOG_ENABLED=true
 DB_WATCHDOG_PERIOD=60
+EOF
+fi
 
+echo "[bootstrap] Creating env account files..."
+mkdir -p env
+if [ -f env/.env_LIG_MAIN ]; then
+  echo "[bootstrap] env/.env_LIG_MAIN exists; skipping overwrite"
+else
+  cat > env/.env_LIG_MAIN <<EOF
+# Lighter venue (LIG_MAIN)
+LIGHTER_API_PRIVATE_KEY=
+LIGHTER_ACCOUNT_INDEX=
+LIGHTER_API_KEY_INDEX=
+EOF
+fi
+if [ -f env/.env_EXT_MAIN ]; then
+  echo "[bootstrap] env/.env_EXT_MAIN exists; skipping overwrite"
+else
+  cat > env/.env_EXT_MAIN <<EOF
+# Extended venue (EXT_MAIN)
+EXTENDED_VAULT_ID=
+EXTENDED_PRIVATE_KEY=
+EXTENDED_PUBLIC_KEY=
+EXTENDED_API_KEY=
+EOF
+fi
+if [ -f env/.env_HYP_MAIN ]; then
+  echo "[bootstrap] env/.env_HYP_MAIN exists; skipping overwrite"
+else
+  cat > env/.env_HYP_MAIN <<EOF
+# Hyperliquid account (HYP_MAIN)
+API_ADDRESS=
+API_PRIVATE_KEY=
 EOF
 fi
 
@@ -114,8 +129,8 @@ else
 {
   "symbols": [
     {
-      "SYMBOL_LIGHTER": "NEW",
-      "SYMBOL_EXTENDED": "NEW-USD",
+      "SYM_VENUE1": "NEW",
+      "SYM_VENUE2": "NEW-USD",
       "MIN_SPREAD": 0.3,
       "SPREAD_TP": 0.2,
       "REPRICE_TICK": 0,

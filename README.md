@@ -27,7 +27,7 @@ What it does:
 - Installs system deps: Python, Node, Tailwind toolchain, PostgreSQL, tmux.
 - Creates `.venv` and installs Python deps from `requirements.txt`.
 - Installs UI deps (npm) plus tailwindcss/postcss/autoprefixer.
-- Writes `.env_server`, `.env_bot` with DB URLs, auth, CORS using your server IP, and API base (UI reads from hardcoded API base in code).
+- Writes `.env_server` with DB URLs, auth, CORS, and placeholder Telegram/watchdog vars, plus `env/.env_LIG_MAIN`/`.env_EXT_MAIN` (and other account files) for venue credentials.
 - Generates `config.json` with a single NEW/NEW-USD pair.
 - Creates `arb_bot` and `arb_bot_test` databases if PostgreSQL is running.
 

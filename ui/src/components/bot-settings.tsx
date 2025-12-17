@@ -2,8 +2,14 @@ import { useMemo, useState } from "react";
 import { AlertCircle, RefreshCcw, Save } from "lucide-react";
 
 type SymbolCfg = Record<string, any> & {
-  SYMBOL_LIGHTER: string;
-  SYMBOL_EXTENDED: string;
+  name?: string;
+  id?: string;
+  SYM_VENUE1: string;
+  SYM_VENUE2: string;
+  VENUE1?: string;
+  VENUE2?: string;
+  ACC_V1?: string;
+  ACC_V2?: string;
 };
 
 type BotSettingsProps = {
@@ -11,7 +17,8 @@ type BotSettingsProps = {
   draft: SymbolCfg;
   numberFields: string[];
   boolFields: string[];
-  onSymbolChange?: (key: "SYMBOL_LIGHTER" | "SYMBOL_EXTENDED", value: string) => void;
+  accountOptions: Array<{ name: string; type: string }>;
+  onSymbolChange?: (key: "SYM_VENUE1" | "SYM_VENUE2" | "ACC_V1" | "ACC_V2" | "name", value: string) => void;
   onNumberChange: (key: string, value: number | "") => void;
   onToggle: (key: string, next: boolean) => void;
   onReset: () => void;
@@ -42,7 +49,7 @@ const tips = [
   "Use TEST_MODE to validate new pairs before going live.",
 ];
 
-export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumberChange, onToggle, onReset, onSave, onSymbolChange }: BotSettingsProps) {
+export function BotSettings({ pairLabel, draft, numberFields, boolFields, accountOptions, onNumberChange, onToggle, onReset, onSave, onSymbolChange }: BotSettingsProps) {
   const [saving, setSaving] = useState(false);
 
   const toBool = (value: any) => value === true || value === "true" || value === 1 || value === "1";
@@ -84,22 +91,43 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumb
     const symbolFields = [
       {
         type: "symbol" as const,
-        key: "SYMBOL_LIGHTER",
-        label: "SYMBOL LIGHTER",
-        description: "Example : BTC",
-        value: draft.SYMBOL_LIGHTER,
+        key: "name",
+        label: "BOT NAME",
+        description: "Display name for this bot",
+        value: draft.name || "",
+      },
+      {
+        type: "account" as const,
+        key: "ACC_V1",
+        label: "VENUE 1 ACCOUNT",
+        description: "Select the account for Venue 1",
+        value: draft.ACC_V1 || "",
       },
       {
         type: "symbol" as const,
-        key: "SYMBOL_EXTENDED",
-        label: "SYMBOL EXTENDED",
-        description: "Example : BTC-USD",
-        value: draft.SYMBOL_EXTENDED,
+        key: "SYM_VENUE1",
+        label: "VENUE 1 SYMBOL",
+        description: "Example: BTC",
+        value: draft.SYM_VENUE1,
+      },
+      {
+        type: "account" as const,
+        key: "ACC_V2",
+        label: "VENUE 2 ACCOUNT",
+        description: "Select the account for Venue 2",
+        value: draft.ACC_V2 || "",
+      },
+      {
+        type: "symbol" as const,
+        key: "SYM_VENUE2",
+        label: "VENUE 2 SYMBOL",
+        description: "Example: BTC-USD",
+        value: draft.SYM_VENUE2,
       },
     ];
     const numFields = numberSettings.map((n) => ({ ...n, type: "number" as const }));
     return [...symbolFields, ...numFields];
-  }, [draft.SYMBOL_EXTENDED, draft.SYMBOL_LIGHTER, numberSettings]);
+  }, [draft.SYM_VENUE2, draft.SYM_VENUE1, draft.ACC_V1, draft.ACC_V2, numberSettings]);
 
   return (
     <div>
@@ -149,9 +177,25 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, onNumb
                   type="text"
                   className="w-full px-3 py-2.5 bg-slate-900/50 border border-slate-700/50 rounded-lg text-slate-300 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
                   value={setting.value ?? ""}
-                  onChange={(e) => onSymbolChange?.(setting.key as "SYMBOL_LIGHTER" | "SYMBOL_EXTENDED", e.target.value)}
+                  onChange={(e) => onSymbolChange?.(setting.key as "SYM_VENUE1" | "SYM_VENUE2", e.target.value)}
                   disabled={!onSymbolChange}
                 />
+              ) : setting.type === "account" ? (
+                <select
+                  className="w-full px-3 py-2.5 bg-slate-900/70 border border-slate-700 text-slate-200 text-sm rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/30 transition-all"
+                  value={setting.value ?? ""}
+                  onChange={(e) => onSymbolChange?.(setting.key as "ACC_V1" | "ACC_V2", e.target.value)}
+                  disabled={!onSymbolChange}
+                >
+                  <option value="" disabled hidden>
+                    Select account
+                  </option>
+                  {accountOptions.map((opt) => (
+                    <option key={`${opt.name}-${opt.type}`} value={opt.name}>
+                      {opt.name} ({opt.type})
+                    </option>
+                  ))}
+                </select>
               ) : (
                 <input
                   type="number"

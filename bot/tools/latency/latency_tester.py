@@ -8,7 +8,7 @@ Runs a tiny hedged market order (Extended LONG, Lighter SHORT) and reports:
 Usage:
   /root/arb_bot/.venv/bin/python -m bot.latency.latency_tester BTC BTC-USD --size 0.0003
 
-Requires trading credentials in .env_bot (EXTENDED_*, LIGHTER_*).
+Requires trading credentials in env/.env_LIG_MAIN and env/.env_EXT_MAIN (or other env/*.env_* files).
 This sends real orders; use a very small size and only in a test account.
 """
 import argparse
@@ -25,22 +25,30 @@ from bot.venues.helper_extended import ExtendedWS
 from bot.venues.helper_lighter import LighterWS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-ENV_PATH = PROJECT_ROOT / ".env_bot"
+ENV_DIR = PROJECT_ROOT / "env"
+ENV_SERVER_PATH = PROJECT_ROOT / ".env_server"
 
 
 def _load_env() -> None:
     """Minimal .env loader."""
-    if not ENV_PATH.exists():
-        return
-    for raw in ENV_PATH.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        if k and v and k not in os.environ:
-            os.environ[k] = v
+
+    def _load_from(path: Path) -> None:
+        if not path.exists():
+            return
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and v and k not in os.environ:
+                os.environ[k] = v
+
+    _load_from(ENV_SERVER_PATH)
+    if ENV_DIR.exists():
+        for env_file in sorted(ENV_DIR.glob(".env_*")):
+            _load_from(env_file)
 
 
 async def _wait_for_books(lighter: LighterWS, extended: ExtendedWS, timeout: float = 20.0) -> bool:

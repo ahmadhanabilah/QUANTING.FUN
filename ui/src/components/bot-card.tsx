@@ -3,7 +3,9 @@ import { Power, TrendingUp, TrendingDown, Activity, ChevronRight, Pin, PinOff } 
 interface BotCardProps {
   bot: {
     id: string;
+    pairId: string;
     name: string;
+    botName?: string;
     status: 'running' | 'stopped';
     pair: string;
     L?: string;
@@ -19,6 +21,8 @@ interface BotCardProps {
 
 export function BotCard({ bot, onToggle, onView, onPin, pinned }: BotCardProps) {
   const isRunning = bot.status === 'running';
+  const titleLabel = bot.name;
+  const validId = bot.id && bot.id.length === 6 ? bot.id : '-';
 
   return (
     <div
@@ -27,15 +31,14 @@ export function BotCard({ bot, onToggle, onView, onPin, pinned }: BotCardProps) 
     >
       {/* Gradient overlay on hover */}
       <div className="absolute inset-0 bg-gradient-to-br from-blue-500/0 to-purple-500/0 group-hover:from-blue-500/5 group-hover:to-purple-500/5 rounded-xl transition-all" />
-      
       <div className="relative">
         <div className="flex items-start justify-between mb-4">
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <h3 className="text-white text-lg">
-                {bot.L || bot.name}
-                <span className="text-xs text-slate-400 font-mono ml-2">{bot.E || bot.pair}</span>
-              </h3>
+              <h3 className="text-white text-lg">{titleLabel}</h3>
+            </div>
+            <div className="text-xs text-slate-400 font-mono mt-1">
+              ID: {validId}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -60,11 +63,9 @@ export function BotCard({ bot, onToggle, onView, onPin, pinned }: BotCardProps) 
                 e.stopPropagation();
                 onToggle();
               }}
-              className={`p-2 rounded-lg transition-all text-xs ${
-                isRunning
-                  ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20'
-                  : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 border border-slate-700/50'
-              }`}
+              className={`p-2 rounded-lg transition-all text-xs ${isRunning
+                ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20'
+                : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 border border-slate-700/50'}`}
             >
               <Power className="w-4 h-4" />
             </button>

@@ -26,7 +26,10 @@ load_env_file() {
 
 # load server/bot/ui envs
 load_env_file "$ROOT/.env_server"
-load_env_file "$ROOT/.env_bot"
+for env_file in "$ROOT/env"/.env_*; do
+  [ -e "$env_file" ] || continue
+  load_env_file "$env_file"
+done
 load_env_file "$ROOT/.env_ui"
 
 # stop any running bot sessions (tmux sessions starting with bot_)
@@ -64,10 +67,10 @@ start_bot() {
   symL="$1"
   symE="$2"
   if [ -z "$symL" ] || [ -z "$symE" ]; then
-    echo "Usage: $0 bot SYMBOL_LIGHTER SYMBOL_EXTENDED"
+    echo "Usage: $0 bot SYM_VENUE1 SYM_VENUE2"
     exit 1
   fi
-  session="bot_${symL}_${symE}"
+  session="bot_L_${symL}__E_${symE}"
   if tmux has-session -t "$session" 2>/dev/null; then
     echo "Bot $symL/$symE already running in tmux session $session"
   else
@@ -106,7 +109,7 @@ case "$1" in
     echo "Stopped API/UI sessions (bots left running)"
     ;;
   *)
-    echo "Usage: $0 [api|ui|bot SYMBOL_LIGHTER SYMBOL_EXTENDED|all|stop]"
+    echo "Usage: $0 [api|ui|bot SYM_VENUE1 SYM_VENUE2|all|stop]"
     exit 1
     ;;
 esac

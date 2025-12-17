@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from typing import Optional
 
@@ -10,6 +11,16 @@ class DBClient:
 
     _instance = None
     _lock = asyncio.Lock()
+    _TRACE_SECTION_COLUMNS = {
+        "bot_configs": "bot_configs",
+        "decision_data": "decision_data",
+        "decision_ob_v1": "decision_ob_v1",
+        "decision_ob_v2": "decision_ob_v2",
+        "trade_v1": "trade_v1",
+        "trade_v2": "trade_v2",
+        "fill_v1": "fill_v1",
+        "fill_v2": "fill_v2",
+    }
 
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -75,6 +86,19 @@ class DBClient:
                 fill_price double precision,
                 latency double precision
             );
+            create table if not exists traces (
+                bot_id text not null,
+                trace text not null,
+                bot_configs jsonb,
+                decision_data jsonb,
+                decision_ob_v1 jsonb,
+                decision_ob_v2 jsonb,
+                trade_v1 jsonb,
+                trade_v2 jsonb,
+                fill_v1 jsonb,
+                fill_v2 jsonb,
+                primary key (bot_id, trace)
+            );
             alter table decisions add column if not exists reason text;
             alter table decisions add column if not exists direction text;
             alter table decisions add column if not exists spread_signal double precision;
@@ -86,7 +110,57 @@ class DBClient:
             alter table trades add column if not exists resp text;
             """
         )
+        # Ensure traces table exists before any trace-based writes occur.
+        # (Table creation is idempotent thanks to IF NOT EXISTS.)
 
+
+    def _serialize(self, payload) -> str | None:
+        if payload is None:
+            return None
+        if isinstance(payload, str):
+            return payload
+        try:
+            return json.dumps(payload)
+        except Exception:
+            return str(payload)
+
+    async def init_trace(self, bot_id: str, trace: str, bot_configs: dict | None,
+                         decision_data: dict | None, ob_v1: dict | None, ob_v2: dict | None):
+        pool = await self._get_pool()
+        bot_configs_val = self._serialize(bot_configs)
+        decision_data_val = self._serialize(decision_data)
+        ob_v1_val = self._serialize(ob_v1)
+        ob_v2_val = self._serialize(ob_v2)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                insert into traces (bot_id, trace, bot_configs, decision_data, decision_ob_v1, decision_ob_v2)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (bot_id, trace) do update
+                set bot_configs = excluded.bot_configs,
+                    decision_data = excluded.decision_data,
+                    decision_ob_v1 = excluded.decision_ob_v1,
+                    decision_ob_v2 = excluded.decision_ob_v2;
+                """,
+                bot_id, trace, bot_configs_val, decision_data_val, ob_v1_val, ob_v2_val
+            )
+
+    async def update_trace_section(self, bot_id: str, trace: str, section: str, payload: dict | None):
+        col = self._TRACE_SECTION_COLUMNS.get(section)
+        if col is None:
+            raise ValueError(f"Unknown trace section: {section}")
+        pool = await self._get_pool()
+        value = self._serialize(payload)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"""
+                insert into traces (bot_id, trace, {col})
+                values ($1, $2, $3)
+                on conflict (bot_id, trace) do update
+                set {col} = $3;
+                """,
+                bot_id, trace, value
+            )
     async def upsert_decision(self, trace: str, ts, bot_name: str, ob_l: str, ob_e: str,
                               inv_before: str, inv_after: str,
                               reason: str | None = None, direction: str | None = None,
@@ -331,3 +405,130 @@ class DBClient:
             "latest_inv_before": inv_before,
             "latest_decision_ts": latest_dec_ts,
         }
+
+    async def fetch_traces(self, bot_id: str, limit: int = 200, offset: int = 0):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                select bot_id, trace, bot_configs, decision_data, decision_ob_v1, decision_ob_v2,
+                       trade_v1, trade_v2, fill_v1, fill_v2
+                from traces
+                where bot_id = $1
+                order by coalesce((decision_data->>'ts')::double precision, 0) desc, trace desc
+                limit $2
+                offset $3;
+                """,
+                bot_id, limit, offset
+            )
+
+    async def fetch_traces_all(self, limit: int = 200, offset: int = 0):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                select bot_id, trace, bot_configs, decision_data, decision_ob_v1, decision_ob_v2,
+                       trade_v1, trade_v2, fill_v1, fill_v2
+                from traces
+                order by coalesce((decision_data->>'ts')::double precision, 0) desc, trace desc
+                limit $1
+                offset $2;
+                """,
+                limit, offset
+            )
+
+    async def recent_activity_stats(self, bot_id: str, since_ts: float):
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select
+                    count(*) filter (
+                        where (decision_data->>'direction') = 'entry'
+                          and (decision_data->>'reason') = 'TT_LE'
+                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
+                    ) as entries_1_2,
+                    count(*) filter (
+                        where (decision_data->>'direction') = 'entry'
+                          and (decision_data->>'reason') = 'TT_EL'
+                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
+                    ) as entries_2_1,
+                    count(*) filter (
+                        where (decision_data->>'direction') = 'exit'
+                          and (decision_data->>'reason') = 'TT_LE'
+                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
+                    ) as exits_1_2,
+                    count(*) filter (
+                        where (decision_data->>'direction') = 'exit'
+                          and (decision_data->>'reason') = 'TT_EL'
+                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
+                    ) as exits_2_1,
+                    count(*) filter (
+                        where coalesce((trade_v1->>'ts_start')::double precision, 0) >= $2
+                    ) as trades_1,
+                    count(*) filter (
+                        where coalesce((trade_v2->>'ts_start')::double precision, 0) >= $2
+                    ) as trades_2,
+                    count(*) filter (
+                        where coalesce((fill_v1->>'ts')::double precision, 0) >= $2
+                    ) as fills_1,
+                    count(*) filter (
+                        where coalesce((fill_v2->>'ts')::double precision, 0) >= $2
+                    ) as fills_2,
+                    avg((trade_v1->>'lat')::double precision) filter (
+                        where coalesce((trade_v1->>'ts_start')::double precision, 0) >= $2
+                    ) as avg_lat_order_ms_1,
+                    avg((trade_v2->>'lat')::double precision) filter (
+                        where coalesce((trade_v2->>'ts_start')::double precision, 0) >= $2
+                    ) as avg_lat_order_ms_2,
+                    avg(((coalesce((fill_v1->>'ts')::double precision, 0) - (decision_data->>'ts')::double precision) * 1000)) filter (
+                        where coalesce((fill_v1->>'ts')::double precision, 0) >= $2
+                          and (decision_data->>'ts') is not null
+                    ) as avg_lat_fill_ms_1,
+                    avg(((coalesce((fill_v2->>'ts')::double precision, 0) - (decision_data->>'ts')::double precision) * 1000)) filter (
+                        where coalesce((fill_v2->>'ts')::double precision, 0) >= $2
+                          and (decision_data->>'ts') is not null
+                    ) as avg_lat_fill_ms_2,
+                    max(
+                        greatest(
+                            coalesce((decision_data->>'ts')::double precision, 0),
+                            coalesce((trade_v1->>'ts_start')::double precision, 0),
+                            coalesce((trade_v2->>'ts_start')::double precision, 0),
+                            coalesce((fill_v1->>'ts')::double precision, 0),
+                            coalesce((fill_v2->>'ts')::double precision, 0)
+                        )
+                    ) as latest_ts
+                from traces
+                where bot_id = $1;
+                """,
+                bot_id,
+                since_ts,
+            )
+            latest_row = await conn.fetchrow(
+                """
+                select decision_data->'inv_after' as inv_after
+                from traces
+                where bot_id = $1 and decision_data->>'ts' is not null
+                order by (decision_data->>'ts')::double precision desc
+                limit 1;
+                """,
+                bot_id
+            )
+            if not row:
+                return None
+            return {
+                "entries_1_2": int(row["entries_1_2"] or 0),
+                "entries_2_1": int(row["entries_2_1"] or 0),
+                "exits_1_2": int(row["exits_1_2"] or 0),
+                "exits_2_1": int(row["exits_2_1"] or 0),
+                "trades_1": int(row["trades_1"] or 0),
+                "trades_2": int(row["trades_2"] or 0),
+                "fills_1": int(row["fills_1"] or 0),
+                "fills_2": int(row["fills_2"] or 0),
+                "avg_lat_order_ms_1": float(row["avg_lat_order_ms_1"]) if row.get("avg_lat_order_ms_1") is not None else None,
+                "avg_lat_order_ms_2": float(row["avg_lat_order_ms_2"]) if row.get("avg_lat_order_ms_2") is not None else None,
+                "avg_lat_fill_ms_1": float(row["avg_lat_fill_ms_1"]) if row.get("avg_lat_fill_ms_1") is not None else None,
+                "avg_lat_fill_ms_2": float(row["avg_lat_fill_ms_2"]) if row.get("avg_lat_fill_ms_2") is not None else None,
+                "latest_ts": float(row["latest_ts"] or 0),
+                "latest_inv_after": latest_row.get("inv_after") if latest_row else None,
+            }

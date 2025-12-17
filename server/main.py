@@ -26,9 +26,9 @@ CONFIG_PATH = ROOT / "config.json"
 LOG_ROOT = BOT_ROOT / "logs"
 TMUX_LOG_DIR = ROOT / "logs"
 ENV_PATH = ROOT / ".env_server"
-ENV_BOT_PATH = ROOT / ".env_bot"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
 PYTHON_BIN = str(VENV_PY) if VENV_PY.exists() else "python3"
+ENV_DIR = ROOT / "env"
 
 
 def _load_env(path: Path):
@@ -47,7 +47,21 @@ def _load_env(path: Path):
 
 
 _load_env(ENV_PATH)
-_load_env(ENV_BOT_PATH)
+ENV_DIR.mkdir(exist_ok=True)
+for env_file in ENV_DIR.glob(".env_*"):
+    try:
+        with env_file.open() as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        continue
 DB_DSN = os.getenv("DATABASE_URL")
 DB_TEST_DSN = os.getenv("TEST_DATABASE_URL")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -86,12 +100,89 @@ def _auth(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 
+def _rand_id(n: int = 6) -> str:
+    import secrets
+    import string
+
+    alphabet = string.ascii_uppercase
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def _ensure_le(entry: dict | None) -> dict:
+    if not isinstance(entry, dict):
+        return {}
+    # normalize venues
+    if not entry.get("VENUE1"):
+        entry["VENUE1"] = "LIGHTER"
+    if not entry.get("VENUE2"):
+        entry["VENUE2"] = "EXTENDED"
+    # drop legacy fields
+    entry.pop("L", None)
+    entry.pop("E", None)
+    # ensure id
+    if not entry.get("id"):
+        entry["id"] = _rand_id()
+    return entry
+
+
 def _pair_dir(symbolL: str, symbolE: str) -> Path:
     return LOG_ROOT / f"{symbolL}:{symbolE}"
 
 
 def _tmux_session(symbolL: str, symbolE: str) -> str:
-    return f"bot_{symbolL}_{symbolE}"
+    """Session naming: L_<symL>__E_<symE> (underscores only)."""
+    safe_l = str(symbolL).replace(":", "_")
+    safe_e = str(symbolE).replace(":", "_")
+    return f"bot_L_{safe_l}__E_{safe_e}"
+
+
+def _strip_symbol(value: str | None) -> str:
+    if not value:
+        return ""
+    val = str(value).strip()
+    idx = val.find(":")
+    return val[idx + 1 :] if idx >= 0 else val
+
+
+def _load_config_symbols():
+    if not CONFIG_PATH.exists():
+        return []
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except Exception:
+        return []
+    symbols = data.get("symbols", []) if isinstance(data, dict) else []
+    if not isinstance(symbols, list):
+        return []
+    return symbols
+
+
+def _match_config_entry(symbolL: str, symbolE: str):
+    norm_l = _strip_symbol(symbolL).upper()
+    norm_e = _strip_symbol(symbolE).upper()
+    if not norm_l or not norm_e:
+        return None
+    symbols = _load_config_symbols()
+    for entry in symbols:
+        if not isinstance(entry, dict):
+            continue
+        sym1 = _strip_symbol(entry.get("SYM_VENUE1")).upper()
+        sym2 = _strip_symbol(entry.get("SYM_VENUE2")).upper()
+        if sym1 == norm_l and sym2 == norm_e:
+            return entry
+        if sym1 == norm_e and sym2 == norm_l:
+            return entry
+    return None
+
+
+def _venue_symbol_pair(entry: dict):
+    sym1 = _strip_symbol(entry.get("SYM_VENUE1"))
+    sym2 = _strip_symbol(entry.get("SYM_VENUE2"))
+    venue1 = str(entry.get("VENUE1", "")).upper()
+    venue2 = str(entry.get("VENUE2", "")).upper()
+    light_sym = sym1 if venue1.startswith("LIGHT") else sym2 if venue2.startswith("LIGHT") else None
+    ext_sym = sym2 if venue2.startswith("EXT") else sym1 if venue1.startswith("EXT") else None
+    return light_sym, ext_sym, venue1, venue2
 
 def _save_tmux_log(session: str, pane: str = "0") -> None:
     TMUX_LOG_DIR.mkdir(exist_ok=True)
@@ -164,6 +255,98 @@ async def _get_db(mode: str = "live") -> DBClient:
         raise HTTPException(status_code=500, detail="DB client unavailable")
     return client
 
+# ----------------- Account helpers -----------------
+
+ACCOUNT_FIELD_MAP = {
+    "LIGHTER": [
+        "LIGHTER_API_PRIVATE_KEY",
+        "LIGHTER_ACCOUNT_INDEX",
+        "LIGHTER_API_KEY_INDEX",
+    ],
+    "EXTENDED": [
+        "EXTENDED_VAULT_ID",
+        "EXTENDED_PRIVATE_KEY",
+        "EXTENDED_PUBLIC_KEY",
+        "EXTENDED_API_KEY",
+    ],
+    "HYPERLIQUID": [
+        "API_ADDRESS",
+        "API_PRIVATE_KEY",
+    ],
+}
+
+ACCOUNT_TYPE_ALIASES = {
+    "LIG": "LIGHTER",
+    "EXT": "EXTENDED",
+    "HYP": "HYPERLIQUID",
+}
+
+
+def _ensure_env_dir():
+    ENV_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _slugify(name: str) -> str:
+    import re
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_") or "account"
+
+
+def _account_filename(name: str, acc_type: str) -> Path:
+    slug = _slugify(name)
+    prefix = acc_type.lower()
+    return ENV_DIR / f".env_{prefix}_{slug}"
+
+
+def _list_accounts() -> list[dict]:
+    _ensure_env_dir()
+    accounts = []
+    for path in ENV_DIR.glob(".env_*_*"):
+        try:
+            parts = path.name.split("_", 2)
+            if len(parts) < 3:
+                continue
+            raw_type = parts[1].upper()
+            suffix = parts[2]
+            acc_type = raw_type if raw_type in ACCOUNT_FIELD_MAP else ACCOUNT_TYPE_ALIASES.get(raw_type)
+            if not acc_type:
+                continue
+            name = suffix
+            if raw_type not in ACCOUNT_FIELD_MAP:
+                name = f"{raw_type}_{suffix}" if suffix else raw_type
+            accounts.append({"name": name, "type": acc_type})
+        except Exception:
+            continue
+    return accounts
+
+
+def _write_account(name: str, acc_type: str, values: dict) -> None:
+    acc_type_up = acc_type.upper()
+    if acc_type_up not in ACCOUNT_FIELD_MAP:
+        raise HTTPException(status_code=400, detail="Invalid account type")
+    allowed_keys = ACCOUNT_FIELD_MAP[acc_type_up]
+    lines = []
+    for key in allowed_keys:
+        val = values.get(key, "")
+        lines.append(f"{key}={val}")
+    _ensure_env_dir()
+    path = _account_filename(name, acc_type_up)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _delete_account(name: str, acc_type: str | None = None) -> None:
+    _ensure_env_dir()
+    targets = []
+    if acc_type:
+        targets.append(_account_filename(name, acc_type))
+    else:
+        for t in ENV_DIR.glob(f".env_*_{_slugify(name)}"):
+            targets.append(t)
+    for t in targets:
+        try:
+            t.unlink()
+        except FileNotFoundError:
+            pass
+
 
 def _tmux_ls() -> List[str]:
     try:
@@ -185,6 +368,41 @@ def _check_token(token: str):
     if user_val != user_expected or password_val != pass_expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     return user_val
+
+
+@app.get("/api/accounts")
+def get_accounts(user: str = Depends(_auth)):
+    try:
+        return {"accounts": _list_accounts()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/accounts")
+def post_account(payload: dict, user: str = Depends(_auth)):
+    try:
+        name = str(payload.get("name", "")).strip()
+        acc_type = str(payload.get("type", "")).strip().upper()
+        values = payload.get("values") or {}
+        if not name or not acc_type:
+            raise HTTPException(status_code=400, detail="name and type are required")
+        _write_account(name, acc_type, values if isinstance(values, dict) else {})
+        return {"ok": True, "account": {"name": name, "type": acc_type}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/accounts/{name}")
+def delete_account(name: str, acc_type: Optional[str] = None, user: str = Depends(_auth)):
+    try:
+        _delete_account(name, acc_type.upper() if acc_type else None)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 async def _send_telegram(msg: str, parse_mode: str | None = "Markdown") -> None:
@@ -242,48 +460,208 @@ async def _db_watchdog_loop():
     def _fmt_lat(val):
         return f"{val:.0f}ms" if val is not None else "n/a"
 
-    def _render_watchdog_table(row: dict) -> str:
-        inv_lines = []
-        long_line = row.get("inv_long") or "—"
-        short_line = row.get("inv_short") or "—"
-        delta_line = row.get("inv_delta") or "—"
+    def _format_price(val):
+        if val is None:
+            return "—"
+        try:
+            return f"{float(val):.6f}"
+        except Exception:
+            return str(val)
+
+    def _calc_spread_inv(snapshot: dict | None) -> float | None:
+        if not snapshot:
+            return None
+        try:
+            qty_v1 = float(snapshot.get("qty_v1") or 0)
+            qty_v2 = float(snapshot.get("qty_v2") or 0)
+            price_v1 = float(snapshot.get("price_v1") or 0)
+            price_v2 = float(snapshot.get("price_v2") or 0)
+        except Exception:
+            return None
+        if qty_v1 > 0 and qty_v2 < 0 and price_v1:
+            return (price_v2 - price_v1) / price_v1 * 100
+        if qty_v1 < 0 and qty_v2 > 0 and price_v2:
+            return (price_v1 - price_v2) / price_v2 * 100
+        return None
+
+    def _normalize_inventory_snapshot(value: any) -> dict | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return None
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return json.loads(value.decode())
+            except Exception:
+                return None
+        return None
+
+    def _format_inventory_lines(snapshot: dict | None) -> list[str]:
+        snap = _normalize_inventory_snapshot(snapshot)
+        lines = ["Latest Inv"]
+
+        qty_v1 = snap.get("qty_v1")
+        price_v1 = snap.get("price_v1")
+        qty_v2 = snap.get("qty_v2")
+        price_v2 = snap.get("price_v2")
+        spread_inv = _calc_spread_inv(snap)
+
         lines = [
-            f"{row['pair']} - Last 1m",
-            "",
-            f"Entries LE/EL       : {row['entries']}",
-            f"Exits LE/EL         : {row['exits']}",
-            f"Trades L/E          : {row['trades']}",
-            f"Fills L/E           : {row['fills']}",
-            f"Avg Lat Orders L/E  : {row['lat_orders']}",
-            f"Avg Lat Fills L/E   : {row['lat_fills']}",
-            # "",
-            # "Latest Inv",
-            # f"Long Venue          : {long_line}",
-            # f"Short Venue         : {short_line}",
-            # f"Δ                   : {delta_line}",
+            f"Latest Inv",
+            f"V1                    : {qty_v1 if qty_v1 is not None else '—'} @ {_format_price(price_v1)}",
+            f"V2                    : {qty_v2 if qty_v2 is not None else '—'} @ {_format_price(price_v2)}",
+            f"Δ                     : {f'{spread_inv:.2f}%' if spread_inv is not None else '—'}"
         ]
-        body = "\n".join(lines)
+        return lines
+
+    def _watchdog_lines(row: dict) -> list[str]:
+        lines = [
+            f"{row.get('bot_name', row.get('pair', 'Unknown'))} ({row.get('bot_id','—')}) - Last 1m",
+            f"V1:{row.get('venue1','1')} / V2:{row.get('venue2','2')}",
+            "",
+            f"Entries 1_2/2_1       : {row.get('entries_1_2', 0)}/{row.get('entries_2_1', 0)}",
+            f"Exits 1_2/2_1         : {row.get('exits_1_2', 0)}/{row.get('exits_2_1', 0)}",
+            f"Trades 1/2            : {row.get('trades_1', 0)}/{row.get('trades_2', 0)}",
+            f"Fills 1/2             : {row.get('fills_1', 0)}/{row.get('fills_2', 0)}",
+            f"Avg Lat Orders 1/2    : {_fmt_lat(row.get('avg_lat_order_ms_1'))} / {_fmt_lat(row.get('avg_lat_order_ms_2'))}",
+            f"Avg Lat Fills 1/2     : {_fmt_lat(row.get('avg_lat_fill_ms_1'))} / {_fmt_lat(row.get('avg_lat_fill_ms_2'))}",
+            "",
+        ]
+        lines.extend(_format_inventory_lines(row.get("latest_inv_after")))
+        return lines
+
+    def _render_watchdog_table(row: dict) -> str:
+        body = "\n".join(_watchdog_lines(row))
         return f"<pre>{body}</pre>"
 
-    # # Send a one-time sample so formatting is obvious
-    # try:
-    #     sample_row = {
-    #         "pair": "SAMPLE:PAIR",
-    #         "entries": "2/1",
-    #         "exits": "1/0",
-    #         "trades": "3/1",
-    #         "fills": "2/1",
-    #         "lat_orders": "62ms / 410ms",
-    #         "lat_fills": "180ms / 200ms",
-    #         "inv_lines": [
-    #             "E -> Qty: -0.001, Price: 93273.0",
-    #             "L -> Qty:  0.001, Price: 93254.0",
-    #             "Δ -> -0.02%",
-    #         ],
-    #     }
-    #     await _send_telegram(_render_watchdog_table(sample_row), parse_mode="HTML")
-    # except Exception:
-    #     pass
+    def _summarize_activity_rows(rows: list[dict], bot_name: str, bot_id: str, venue1: str, venue2: str) -> dict:
+        stats = {
+            "bot_name": bot_name,
+            "bot_id": bot_id,
+            "venue1": venue1 or "1",
+            "venue2": venue2 or "2",
+            "entries_1_2": 0,
+            "entries_2_1": 0,
+            "exits_1_2": 0,
+            "exits_2_1": 0,
+            "trades_1": 0,
+            "trades_2": 0,
+            "fills_1": 0,
+            "fills_2": 0,
+            "avg_lat_order_ms_1": None,
+            "avg_lat_order_ms_2": None,
+            "avg_lat_fill_ms_1": None,
+            "avg_lat_fill_ms_2": None,
+            "latest_inv_after": None,
+        }
+        order_lat_sum_1 = order_lat_cnt_1 = 0
+        order_lat_sum_2 = order_lat_cnt_2 = 0
+        fill_lat_sum_1 = fill_lat_cnt_1 = 0
+        fill_lat_sum_2 = fill_lat_cnt_2 = 0
+        latest_ts = 0
+
+        def _parse_number(value: any) -> float | None:
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        for row in rows:
+            decision = _parse_trace_json(row.get("decision_data")) if row.get("decision_data") else {}
+            if decision:
+                reason = (decision.get("reason") or "").upper()
+                direction = (decision.get("direction") or "").lower()
+                ts_val = _parse_number(decision.get("ts"))
+                if ts_val and ts_val > latest_ts:
+                    latest_ts = ts_val
+                    stats["latest_inv_after"] = decision.get("inv_after")
+                if reason == "TT_LE":
+                    if direction == "entry":
+                        stats["entries_1_2"] += 1
+                    elif direction == "exit":
+                        stats["exits_1_2"] += 1
+                if reason == "TT_EL":
+                    if direction == "entry":
+                        stats["entries_2_1"] += 1
+                    elif direction == "exit":
+                        stats["exits_2_1"] += 1
+            trade1 = _parse_trace_json(row.get("trade_v1")) if row.get("trade_v1") else {}
+            if trade1:
+                stats["trades_1"] += 1
+                lat = _parse_number(trade1.get("lat"))
+                if lat is not None:
+                    order_lat_sum_1 += lat
+                    order_lat_cnt_1 += 1
+            trade2 = _parse_trace_json(row.get("trade_v2")) if row.get("trade_v2") else {}
+            if trade2:
+                stats["trades_2"] += 1
+                lat = _parse_number(trade2.get("lat"))
+                if lat is not None:
+                    order_lat_sum_2 += lat
+                    order_lat_cnt_2 += 1
+            fill1 = _parse_trace_json(row.get("fill_v1")) if row.get("fill_v1") else {}
+            if fill1:
+                stats["fills_1"] += 1
+                fill_ts = _parse_number(fill1.get("ts"))
+                decision_ts = _parse_number(decision.get("ts"))
+                if fill_ts is not None and decision_ts is not None:
+                    fill_lat_sum_1 += (fill_ts - decision_ts) * 1000
+                    fill_lat_cnt_1 += 1
+            fill2 = _parse_trace_json(row.get("fill_v2")) if row.get("fill_v2") else {}
+            if fill2:
+                stats["fills_2"] += 1
+                fill_ts = _parse_number(fill2.get("ts"))
+                decision_ts = _parse_number(decision.get("ts"))
+                if fill_ts is not None and decision_ts is not None:
+                    fill_lat_sum_2 += (fill_ts - decision_ts) * 1000
+                    fill_lat_cnt_2 += 1
+        if order_lat_cnt_1:
+            stats["avg_lat_order_ms_1"] = order_lat_sum_1 / order_lat_cnt_1
+        if order_lat_cnt_2:
+            stats["avg_lat_order_ms_2"] = order_lat_sum_2 / order_lat_cnt_2
+        if fill_lat_cnt_1:
+            stats["avg_lat_fill_ms_1"] = fill_lat_sum_1 / fill_lat_cnt_1
+        if fill_lat_cnt_2:
+            stats["avg_lat_fill_ms_2"] = fill_lat_sum_2 / fill_lat_cnt_2
+        return stats
+
+    async def _send_initial_activity_sample(symbols: list[dict]):
+        def _is_mega(item: dict) -> bool:
+            name_val = (item.get("name") or "").upper()
+            sym_val = (item.get("SYM_VENUE1") or "").upper()
+            return name_val == "MEGA" or sym_val == "MEGA"
+
+        target = next((item for item in symbols if _is_mega(item)), None)
+        if not target:
+            return
+        target_id = target.get("id") or target.get("BOT_ID")
+        if not target_id:
+            return
+        sym_l = target.get("SYM_VENUE1")
+        sym_e = target.get("SYM_VENUE2")
+        bot_name = f"TT:{sym_l}:{sym_e}" if sym_l and sym_e else target.get("name") or "MEGA"
+        try:
+            rows = await db.fetch_traces(target_id, limit=5)
+        except Exception:
+            return
+        if not rows:
+            return
+        venue1 = target.get("VENUE1") or target.get("venue1") or "LIGHTER"
+        venue2 = target.get("VENUE2") or target.get("venue2") or "EXTENDED"
+        summary_stats = _summarize_activity_rows(rows, bot_name, target_id, venue1, venue2)
+        lines = _watchdog_lines(summary_stats)
+
+        try:
+            await _send_telegram("<pre>" + "\n".join(lines) + "</pre>", parse_mode="HTML")
+        except Exception as exc:
+            print(f"[watchdog] initial sample error: {exc}")
+
+    initial_sample_sent = False
 
     while True:
         try:
@@ -297,83 +675,57 @@ async def _db_watchdog_loop():
             if not symbols:
                 await asyncio.sleep(WATCHDOG_PERIOD)
                 continue
+            if not initial_sample_sent:
+                await _send_initial_activity_sample(symbols)
+                initial_sample_sent = True
             now = datetime.now(tz=timezone.utc)
             since = now - timedelta(seconds=60)
             table_rows = []
             for item in symbols:
-                sym_l = item.get("SYMBOL_LIGHTER")
-                sym_e = item.get("SYMBOL_EXTENDED")
+                sym_l = item.get("SYM_VENUE1")
+                sym_e = item.get("SYM_VENUE2")
                 if not sym_l or not sym_e:
                     continue
-                bot_name = f"TT:{sym_l}:{sym_e}"
-                summary = await db.recent_summary(bot_name, since)
-                # only notify if there are trades in the last minute
-                if summary.get("trades_1m", 0) <= 0:
+                default_name = f"TT:{sym_l}:{sym_e}"
+                bot_name = item.get("name") or default_name
+                bot_id = item.get("id") or item.get("BOT_ID") or bot_name
+                stats = await db.recent_activity_stats(bot_id, since.timestamp())
+                if not stats:
                     continue
-                inv_str = summary.get("latest_inv_after") or summary.get("latest_inv_before") or "n/a"
-                avg_o = summary.get("avg_lat_order_ms")
-                avg_f = summary.get("avg_lat_fill_ms")
-                inv_lines = []
-                inv_long = None
-                inv_short = None
-                inv_delta = None
-                if isinstance(inv_str, str):
-                    parts = [p.strip() for p in inv_str.split("|") if p.strip()]
-                    for part in parts:
-                        if part.startswith("E ->") or part.startswith("L ->"):
-                            # strip order/fill details, keep qty/price only
-                            tokens = [t.strip() for t in part.split(",") if t.strip()]
-                            trimmed = []
-                            qty_val = None
-                            for tok in tokens:
-                                if tok.lower().startswith("order") or tok.lower().startswith("fill"):
-                                    continue
-                                trimmed.append(tok)
-                                if tok.lower().startswith("qty:"):
-                                    try:
-                                        qty_val = float(tok.split(":")[1].strip())
-                                    except Exception:
-                                        qty_val = None
-                            line = ", ".join(trimmed)
-                            inv_lines.append(line)
-                            if qty_val is not None:
-                                if qty_val > 0 and inv_long is None:
-                                    inv_long = line
-                                elif qty_val < 0 and inv_short is None:
-                                    inv_short = line
-                        elif "Δ" in part:
-                            inv_delta = part
-                    # fallback assign if not determined
-                    if inv_long is None and inv_lines:
-                        inv_long = inv_lines[0]
-                    if inv_short is None and len(inv_lines) > 1:
-                        inv_short = inv_lines[1]
-                entries_le = summary.get("entries_le", 0)
-                entries_el = summary.get("entries_el", 0)
-                exits_le = summary.get("exits_le", 0)
-                exits_el = summary.get("exits_el", 0)
-                trades_L = summary.get("trades_L", 0)
-                trades_E = summary.get("trades_E", 0)
-                fills_L = summary.get("fills_L", 0)
-                fills_E = summary.get("fills_E", 0)
-                avg_o_L = summary.get("avg_lat_order_ms_L")
-                avg_o_E = summary.get("avg_lat_order_ms_E")
-                avg_f_L = summary.get("avg_lat_fill_ms_L")
-                avg_f_E = summary.get("avg_lat_fill_ms_E")
-
+                activity_count = sum(
+                    stats.get(key, 0)
+                    for key in [
+                        "entries_1_2",
+                        "entries_2_1",
+                        "exits_1_2",
+                        "exits_2_1",
+                        "trades_1",
+                        "trades_2",
+                        "fills_1",
+                        "fills_2",
+                    ]
+                )
+                if activity_count <= 0:
+                    continue
                 table_rows.append(
                     {
-                        "pair": f"{sym_l}:{sym_e}",
-                        "entries": f"{entries_le}/{entries_el}",
-                        "exits": f"{exits_le}/{exits_el}",
-                        "trades": f"{trades_L}/{trades_E}",
-                        "fills": f"{fills_L}/{fills_E}",
-                        "lat_orders": f"{_fmt_lat(avg_o_L)} / {_fmt_lat(avg_o_E)}",
-                        "lat_fills": f"{_fmt_lat(avg_f_L)} / {_fmt_lat(avg_f_E)}",
-                        "inv_lines": inv_lines,
-                        "inv_long": inv_long,
-                        "inv_short": inv_short,
-                        "inv_delta": inv_delta,
+                        "bot_id": bot_id,
+                        "bot_name": bot_name,
+                        "venue1": item.get("VENUE1") or item.get("venue1") or "1",
+                        "venue2": item.get("VENUE2") or item.get("venue2") or "2",
+                        "entries_1_2": stats.get("entries_1_2", 0),
+                        "entries_2_1": stats.get("entries_2_1", 0),
+                        "exits_1_2": stats.get("exits_1_2", 0),
+                        "exits_2_1": stats.get("exits_2_1", 0),
+                        "trades_1": stats.get("trades_1", 0),
+                        "trades_2": stats.get("trades_2", 0),
+                        "fills_1": stats.get("fills_1", 0),
+                        "fills_2": stats.get("fills_2", 0),
+                        "avg_lat_order_ms_1": stats.get("avg_lat_order_ms_1"),
+                        "avg_lat_order_ms_2": stats.get("avg_lat_order_ms_2"),
+                        "avg_lat_fill_ms_1": stats.get("avg_lat_fill_ms_1"),
+                        "avg_lat_fill_ms_2": stats.get("avg_lat_fill_ms_2"),
+                        "latest_inv_after": stats.get("latest_inv_after"),
                     }
                 )
 
@@ -399,7 +751,27 @@ def get_config(user: str = Depends(_auth)):
     if not CONFIG_PATH.exists():
         return {"symbols": []}
     try:
-        return json.loads(CONFIG_PATH.read_text())
+        data = json.loads(CONFIG_PATH.read_text())
+        symbols = data.get("symbols", []) if isinstance(data, dict) else []
+        changed = False
+        for sym in symbols:
+            if not isinstance(sym, dict):
+                continue
+            prev_id = sym.get("id")
+            had_LE = "L" in sym or "E" in sym
+            _ensure_le(sym)
+            if (not prev_id and sym.get("id")) or had_LE:
+                changed = True
+        if changed and isinstance(data, dict):
+            data["symbols"] = symbols
+            try:
+                CONFIG_PATH.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
+        if isinstance(data, dict):
+            data["symbols"] = symbols
+            return data
+        return {"symbols": symbols}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -407,6 +779,10 @@ def get_config(user: str = Depends(_auth)):
 @app.put("/api/config")
 def put_config(payload: dict, user: str = Depends(_auth)):
     try:
+        symbols = payload.get("symbols") if isinstance(payload, dict) else None
+        if isinstance(symbols, list):
+            for sym in symbols:
+                _ensure_le(sym if isinstance(sym, dict) else {})
         CONFIG_PATH.write_text(json.dumps(payload, indent=2))
         return {"ok": True}
     except Exception as exc:
@@ -426,13 +802,14 @@ def add_symbol(payload: dict, user: str = Depends(_auth)):
             symbols = []
 
         new_sym = payload or {}
-        sym_l = str(new_sym.get("SYMBOL_LIGHTER", "")).strip()
-        sym_e = str(new_sym.get("SYMBOL_EXTENDED", "")).strip()
+        sym_l = str(new_sym.get("SYM_VENUE1", "")).strip()
+        sym_e = str(new_sym.get("SYM_VENUE2", "")).strip()
         if not sym_l or not sym_e:
-            raise HTTPException(status_code=400, detail="SYMBOL_LIGHTER and SYMBOL_EXTENDED are required")
-        if any(s.get("SYMBOL_LIGHTER") == sym_l and s.get("SYMBOL_EXTENDED") == sym_e for s in symbols):
+            raise HTTPException(status_code=400, detail="SYM_VENUE1 and SYM_VENUE2 are required")
+        if any(s.get("SYM_VENUE1") == sym_l and s.get("SYM_VENUE2") == sym_e for s in symbols):
             raise HTTPException(status_code=400, detail="Symbol already exists")
 
+        _ensure_le(new_sym)
         symbols.append(new_sym)
         config["symbols"] = symbols
         CONFIG_PATH.write_text(json.dumps(config, indent=2))
@@ -452,10 +829,25 @@ def get_symbols(user: str = Depends(_auth)):
 
 @app.post("/api/start")
 def start_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
-    session = _tmux_session(symbolL, symbolE)
+    sym_l = _strip_symbol(symbolL)
+    sym_e = _strip_symbol(symbolE)
+    session_sym_l = sym_l
+    session_sym_e = sym_e
+    module = "bot.core.tt_bot_lig_ext"
+    entry = _match_config_entry(sym_l, sym_e)
+    if entry:
+        light_sym, ext_sym, _, _ = _venue_symbol_pair(entry)
+        if light_sym and ext_sym:
+            session_sym_l = light_sym
+            session_sym_e = ext_sym
+    if not session_sym_l:
+        session_sym_l = sym_l
+    if not session_sym_e:
+        session_sym_e = sym_e
+    session = _tmux_session(session_sym_l, session_sym_e)
     if session in _tmux_ls():
         return {"ok": True, "msg": "already running"}
-    cmd = f"cd {ROOT} && {PYTHON_BIN} -m bot.core.tt_bot {symbolL} {symbolE}"
+    cmd = f"cd {ROOT} && {PYTHON_BIN} -m {module} {session_sym_l} {session_sym_e}"
     try:
         subprocess.check_call(["tmux", "new-session", "-d", "-s", session, cmd])
         return {"ok": True}
@@ -465,7 +857,21 @@ def start_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
 
 @app.post("/api/stop")
 def stop_bot(symbolL: str, symbolE: str, user: str = Depends(_auth)):
-    session = _tmux_session(symbolL, symbolE)
+    sym_l = _strip_symbol(symbolL)
+    sym_e = _strip_symbol(symbolE)
+    session_sym_l = sym_l
+    session_sym_e = sym_e
+    entry = _match_config_entry(sym_l, sym_e)
+    if entry:
+        light_sym, ext_sym, _, _ = _venue_symbol_pair(entry)
+        if light_sym and ext_sym:
+            session_sym_l = light_sym
+            session_sym_e = ext_sym
+    if not session_sym_l:
+        session_sym_l = sym_l
+    if not session_sym_e:
+        session_sym_e = sym_e
+    session = _tmux_session(session_sym_l, session_sym_e)
     if session not in _tmux_ls():
         return {"ok": True, "msg": "not running"}
     try:
@@ -773,9 +1179,35 @@ async def api_tt_fills_all(mode: str = "live", limit: int = 200, user: str = Dep
     return {"rows": rows}
 
 
+@app.get("/api/tt/activities")
+async def api_tt_activities(botId: str | None = None, mode: str = "live", limit: int = 200, offset: int = 0, user: str = Depends(_auth)):
+    db = await _get_db(mode)
+    if botId:
+        records = await db.fetch_traces(botId, limit=limit, offset=offset)
+    else:
+        records = await db.fetch_traces_all(limit=limit, offset=offset)
+    rows = []
+    for r in records:
+        rows.append(
+            {
+                "bot_id": r.get("bot_id"),
+                "trace": r.get("trace"),
+                "bot_configs": _parse_trace_json(r.get("bot_configs")),
+                "decision_data": _parse_trace_json(r.get("decision_data")),
+                "decision_ob_v1": _parse_trace_json(r.get("decision_ob_v1")),
+                "decision_ob_v2": _parse_trace_json(r.get("decision_ob_v2")),
+                "trade_v1": _parse_trace_json(r.get("trade_v1")),
+                "trade_v2": _parse_trace_json(r.get("trade_v2")),
+                "fill_v1": _parse_trace_json(r.get("fill_v1")),
+                "fill_v2": _parse_trace_json(r.get("fill_v2")),
+            }
+        )
+    return {"rows": rows}
+
+
 @app.get("/api/env")
 def get_env(user: str = Depends(_auth)):
-    env_path = ROOT / ".env_bot"
+    env_path = ENV_PATH
     if not env_path.exists():
         return PlainTextResponse("", media_type="text/plain")
     return PlainTextResponse(env_path.read_text())
@@ -783,7 +1215,7 @@ def get_env(user: str = Depends(_auth)):
 
 @app.put("/api/env")
 def put_env(body: dict, user: str = Depends(_auth)):
-    env_path = ROOT / ".env_bot"
+    env_path = ENV_PATH
     text = body.get("text", "")
     env_path.write_text(text)
     return {"ok": True}
@@ -794,3 +1226,14 @@ def put_env(body: dict, user: str = Depends(_auth)):
 def auth_token(user: str = Depends(_auth)):
     token = base64.b64encode(f"{user}:{os.getenv('AUTH_PASS','admin')}".encode()).decode()
     return {"token": token}
+
+def _parse_trace_json(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        raw = value.decode() if isinstance(value, bytes) else value
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    return value

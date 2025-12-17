@@ -1,6 +1,5 @@
 # PYTHONPATH=. .venv/bin/python -m bot.core.tt_bot BTC BTC-USD
 import asyncio
-import re
 import time
 import os
 import uuid
@@ -37,7 +36,8 @@ class TTBot:
                  max_of_ob: float = 0.3,
                  heartbeat_enabled: bool = False,
                  heartbeat_interval: float = 60.0,
-                 slippage: float = SLIPPAGE_DEFAULT):
+                 slippage: float = SLIPPAGE_DEFAULT,
+                 bot_config: dict | None = None):
         self.state              = state
         self.L                  = lighter
         self.E                  = extended
@@ -73,6 +73,24 @@ class TTBot:
         self._last_spreads      = {}
         self.bot_name           = f"TT:{self.symbolL}:{self.symbolE}"
         self.db_client          = None
+        self._bot_config = bot_config or {}
+        bot_id_val = str(
+            self._bot_config.get("BOT_ID")
+            or self._bot_config.get("id")
+            or self.bot_name
+        )
+        bot_name_val = self._bot_config.get("name") or self.bot_name
+        venue1_name = self._bot_config.get("VENUE1") or "LIGHTER"
+        venue2_name = self._bot_config.get("VENUE2") or "EXTENDED"
+        self._bot_id = bot_id_val
+        self._bot_config_payload = {
+            "botId": bot_id_val,
+            "botName": bot_name_val,
+            "venue1": venue1_name,
+            "venue2": venue2_name,
+            "account_v1": self._bot_config.get("ACC_V1"),
+            "account_v2": self._bot_config.get("ACC_V2"),
+        }
         # track position WS updates so we can gate new trades until fresh snapshots land
         self._pos_seq           = {"L": 0, "E": 0}
         self._pos_wait_targets  = None
@@ -210,7 +228,9 @@ class TTBot:
             pass
 
         # 2) decision
-        decision = logic_entry_exit(
+        ob_snapshot_L = dict(self.L.ob)
+        ob_snapshot_E = dict(self.E.ob)
+        decision, decision_ts = logic_entry_exit(
             self.state,
             spreads,
             self.minSpread,
@@ -222,6 +242,7 @@ class TTBot:
             size_hint_el=size_hint_el,
             max_position_value=self.max_position_value,
             signals_remaining=getattr(self.state, "signals_remaining", None),
+            return_ts=True,
         )
 
         # enforce TT-only execution; skip anything not a TT tuple (TT or warmup tags)
@@ -241,6 +262,8 @@ class TTBot:
                 "spread_signal": self._last_spreads.get(getattr(decision[0], "reason", ""), None),
                 "ob_price_L": self.L.ob["askPrice"] if decision[0].side == Side.LONG else self.L.ob["bidPrice"],
                 "ob_price_E": self.E.ob["askPrice"] if decision[1].side == Side.LONG else self.E.ob["bidPrice"],
+                "ob_snapshot_L": ob_snapshot_L,
+                "ob_snapshot_E": ob_snapshot_E,
                 "exec_price_L": None,
                 "exec_price_E": None,
                 "qty": getattr(decision[0], "_tt_size", None) or getattr(decision[1], "_tt_size", None),
@@ -271,7 +294,13 @@ class TTBot:
         # log initial decision immediately so DB has a row even if fills/logs lag
         try:
             ctx_snapshot = dict(self.state.last_trade_ctx)
-            asyncio.create_task(self._log_decision_db(initial=True, ctx=ctx_snapshot))
+            asyncio.create_task(
+                self._log_decision_db(
+                    initial=True,
+                    ctx=ctx_snapshot,
+                    decision_ts=decision_ts,
+                )
+            )
         except Exception:
             logger_db.exception("[ERROR INSERT DECISION]")
         warm_reason = getattr(decision[0], "reason", None) if isinstance(decision, tuple) else None
@@ -283,7 +312,13 @@ class TTBot:
         if warm_reason in ("WARM_UP_LE", "WARM_UP_EL"):
             # log initial decision trace before fills
             ctx_snapshot = dict(self.state.last_trade_ctx) if getattr(self.state, "last_trade_ctx", None) else None
-            asyncio.create_task(self._log_decision_db(initial=True, ctx=ctx_snapshot))
+            asyncio.create_task(
+                self._log_decision_db(
+                    initial=True,
+                    ctx=ctx_snapshot,
+                    decision_ts=decision_ts,
+                )
+            )
 
         # if capped, decrement once when we have a non-NONE decision
         def _consume_signal_if_needed(dec):
@@ -324,6 +359,8 @@ class TTBot:
                             self.state.invE,
                             getattr(self.state, "entry_price_E", 0),
                         ),
+                        "ob_snapshot_L": ob_snapshot_L,
+                        "ob_snapshot_E": ob_snapshot_E,
                     }
                     self._trade_complete_logged = False
                 reasons = [getattr(d, "reason", None) for d in decision]
@@ -400,11 +437,13 @@ class TTBot:
                         else:
                             self.state.last_trade_ctx["ob_price_E"] = px_ob
                             self.state.last_trade_ctx["exec_price_E"] = exec_px
-                    qty_log = shared or "N/A"
+                    qty_val = shared
+
                     # detailed consecutive snapshot already stored per hit
                     cons_list = hist
                     trace_val = getattr(self, "_current_trace", None) or getattr(self.state, "last_trade_ctx", {}).get("trace")
-                    logger_tt.info(f"[DECISION MADE] {trace_val} {reasons[0]} {dir_label}")
+                    logger_tt.info(f"[DECISION MADE] {trace_val} {reasons[0]} size={qty_val} {dir_label}")
+
                     # reset counters after firing
                     self.state.tt_le_hits = 0
                     self.state.tt_el_hits = 0
@@ -415,9 +454,18 @@ class TTBot:
                 self._pending_db = True
                 ctx_snapshot = dict(self.state.last_trade_ctx) if getattr(self.state, "last_trade_ctx", None) else None
                 trace_for_trades = getattr(self, "_current_trace", None) or (ctx_snapshot or {}).get("trace") or "unknown"
-                ts_for_trades = (ctx_snapshot or {}).get("ts") or time.time()
                 send_tasks = [asyncio.create_task(self._execute_single(d, log_decision=True)) for d in decision]
-                log_task = asyncio.create_task(self._log_decision_db(initial=True, ctx=ctx_snapshot)) if ctx_snapshot else None
+                log_task = (
+                    asyncio.create_task(
+                        self._log_decision_db(
+                            initial=True,
+                            ctx=ctx_snapshot,
+                            decision_ts=decision_ts,
+                        )
+                    )
+                    if ctx_snapshot
+                    else None
+                )
                 all_tasks = send_tasks + ([log_task] if log_task else [])
                 results = await asyncio.gather(*all_tasks, return_exceptions=True)
                 send_results = results[: len(send_tasks)]
@@ -428,20 +476,18 @@ class TTBot:
                     if not res or isinstance(res, Exception):
                         continue
                     trace_val = trace_for_trades
-                    ts_val = ts_for_trades
                     await self._push_trade_db(
                         trace=trace_val,
-                        ts=ts_val,
                         venue=res["venue"],
-                        size=res["size"],
-                        ob_price=res["ob_price"],
-                        exec_price=res["exec_price"],
-                        lat_order=res["lat_order"],
-                        reason=res["reason"],
-                        direction=res["direction"],
-                        status=res["status"],
+                        ts_start=res.get("ts_start"),
+                        ts_end=res.get("ts_end"),
                         payload=res.get("payload"),
                         resp=res.get("resp"),
+                        lat=res.get("lat_order"),
+                        status=res.get("status"),
+                        reason=res.get("reason"),
+                        direction=res.get("direction"),
+                        size=res.get("size"),
                     )
             else:
                 await self._execute_single(decision)
@@ -847,7 +893,6 @@ class TTBot:
             pass
         # push fills to DB if available
         trace_val = getattr(self, "_current_trace", None) or ctx.get("trace")
-        ts_val = ctx.get("ts", time.time())
         fill_info = {
             "L": {"price": fill_L, "lat_order": olat_L, "lat_fill": flat_L, "qty": qty_val},
             "E": {"price": fill_E, "lat_order": olat_E, "lat_fill": flat_E, "qty": qty_val},
@@ -860,21 +905,23 @@ class TTBot:
         if trace_val:
             base_qty_long = qty_val if qty_val is not None else None
             base_qty_short = -qty_val if qty_val is not None else None
+            fill_ts_long = getattr(self.state, "last_fill_ts_L", None) or time.time()
+            fill_ts_short = getattr(self.state, "last_fill_ts_E", None) or time.time()
+            fill_price_long = getattr(self.state, "last_fill_price_L", None)
+            fill_price_short = getattr(self.state, "last_fill_price_E", None)
             await self._push_fill_db(
                 trace=trace_val,
-                ts=ts_val,
                 venue=venue_long,
-                base_amount=base_qty_long,
-                fill_price=fill_long,
-                latency=_to_float(lat_fill_long),
+                ts=fill_ts_long,
+                size=base_qty_long,
+                fill_price=fill_price_long,
             )
             await self._push_fill_db(
                 trace=trace_val,
-                ts=ts_val,
                 venue=venue_short,
-                base_amount=base_qty_short,
-                fill_price=fill_short,
-                latency=_to_float(lat_fill_short),
+                ts=fill_ts_short,
+                size=base_qty_short,
+                fill_price=fill_price_short,
             )
         else:
             logger_db.warning("[ERROR INSERT FILL]")
@@ -897,6 +944,8 @@ class TTBot:
         self.state.last_fill_price_E = None
         self.state.last_fill_latency_L = None
         self.state.last_fill_latency_E = None
+        self.state.last_fill_ts_L = None
+        self.state.last_fill_ts_E = None
         self.state.last_send_latency_L = None
         self.state.last_send_latency_E = None
         # defer clearing trade context when waiting for position updates so we can refresh DB once snapshots arrive
@@ -906,225 +955,108 @@ class TTBot:
         self.state.last_trade_ctx = None
         self._current_trace = None
 
-    async def _log_decision_db(self, initial: bool, inv_after=None, fill_info=None, ctx=None):
-        """Emit decision DB trace for warm-up legs and push to Postgres."""
+    async def _log_decision_db(
+        self,
+        initial: bool,
+        inv_after=None,
+        fill_info=None,
+        ctx=None,
+        decision_ts: float | None = None,
+    ):
         ctx = ctx or getattr(self.state, "last_trade_ctx", None)
         if not ctx:
             return
-        def _hydrate_inv(inv_tuple):
-            """Backfill zero entries with latest helper state to avoid empty logs."""
-            lq, le, eq, ee = inv_tuple
-            try:
-                if abs(eq) < 1e-12 and abs(getattr(self.E, "position_qty", 0) or 0) > 0:
-                    eq = getattr(self.E, "position_qty", eq)
-                    ee = getattr(self.E, "position_entry", ee)
-                if abs(lq) < 1e-12 and abs(getattr(self.L, "position_qty", 0) or 0) > 0:
-                    lq = getattr(self.L, "position_qty", lq)
-                    le = getattr(self.L, "position_entry", le)
-            except Exception:
-                pass
-            return (lq, le, eq, ee)
-        def _fmt_price_local(val):
-            try:
-                return f"{float(val):.6f}"
-            except Exception:
-                return str(val)
-        def _fmt_lat(val):
-            try:
-                return f"{float(val):.0f}"
-            except Exception:
-                return "N/A"
-        def _inv_json(inv_tuple):
-            lq, le, eq, ee = inv_tuple
-            if lq > 0 and eq < 0:
-                ordered = [
-                    {"venue": "L", "qty": lq, "price": le},
-                    {"venue": "E", "qty": eq, "price": ee},
-                ]
-            elif eq > 0 and lq < 0:
-                ordered = [
-                    {"venue": "E", "qty": eq, "price": ee},
-                    {"venue": "L", "qty": lq, "price": le},
-                ]
-            else:
-                ordered = [
-                    {"venue": "L", "qty": lq, "price": le},
-                    {"venue": "E", "qty": eq, "price": ee},
-                ]
-            return json.dumps(ordered)
-        def _inv_block(inv_tuple, spread_val=None, fill_info_local=None, include_lat: bool = True):
-            lq, le, eq, ee = inv_tuple
-            spread_inv = 0.0
-            if lq > 0 and eq < 0 and le:
-                spread_inv = (ee - le) / le * 100
-            elif lq < 0 and eq > 0 and ee:
-                spread_inv = (le - ee) / ee * 100
-            info_L = (fill_info_local or {}).get("L", {})
-            info_E = (fill_info_local or {}).get("E", {})
-            lat_order_L = info_L.get("lat_order")
-            lat_order_E = info_E.get("lat_order")
-            lat_fill_L = info_L.get("lat_fill")
-            lat_fill_E = info_E.get("lat_fill")
-            if include_lat:
-                line_e = f"E -> Qty: {eq}, Price: {_fmt_price_local(ee)}, Order: {_fmt_lat(lat_order_E)}ms, Fill: {_fmt_lat(lat_fill_E)}ms"
-                line_l = f"L -> Qty: {lq}, Price: {_fmt_price_local(le)}, Order: {_fmt_lat(lat_order_L)}ms, Fill: {_fmt_lat(lat_fill_L)}ms"
-            else:
-                line_e = f"E -> Qty: {eq}, Price: {_fmt_price_local(ee)}"
-                line_l = f"L -> Qty: {lq}, Price: {_fmt_price_local(le)}"
-            line_spread = f"Δ -> {spread_inv if spread_val is None else spread_val:.2f}%"
-            if lq > 0 and eq < 0:
-                ordered_lines = [line_l, line_e]
-            elif eq > 0 and lq < 0:
-                ordered_lines = [line_e, line_l]
-            else:
-                ordered_lines = [line_l, line_e]
-            return " | ".join(ordered_lines + [line_spread])
-
-        ts_readable = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ctx.get("ts", time.time())))
-        reason = ctx.get("reason", "")
-        dir_label = ctx.get("dir", "")
-        qty = ctx.get("qty", None)
-        obL = getattr(self.L, "ob", {})
-        obE = getattr(self.E, "ob", {})
-        ob_str_L = f"{obL.get('bidPrice')}/{obL.get('askPrice')}"
-        ob_str_E = f"{obE.get('bidPrice')}/{obE.get('askPrice')}"
-        # Use snapshot captured at decision time if available; fallback to current state
-        inv_before_ctx = ctx.get("inv_before")
-        if inv_before_ctx is None:
-            inv_before = (
-                getattr(self.state, "invL", 0.0),
-                getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0.0)),
-                getattr(self.state, "invE", 0.0),
-                getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0.0)),
-            )
-        else:
-            inv_before = inv_before_ctx
-        inv_before_str = _inv_block(inv_before, spread_val=ctx.get("spread_signal"), fill_info_local=None, include_lat=False)
-        # for inv_after, compute spread from actual entry prices instead of reusing signal spread
-        # match inv_before formatting: omit order/fill latency details
-        if inv_after is None:
-            inv_after = (
-                getattr(self.state, "invL", 0.0),
-                getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0.0)),
-                getattr(self.state, "invE", 0.0),
-                getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0.0)),
-            )
-        inv_after_str = "" if inv_after is None else _inv_block(inv_after, spread_val=None, fill_info_local=None, include_lat=False)
-        inv_before_json = _inv_json(inv_before) if inv_before is not None else None
-        inv_after_json = _inv_json(inv_after) if inv_after is not None else None
-        if qty in ("", None):
-            try:
-                lq_before, _, eq_before, _ = inv_before
-                lq_after, _, eq_after, _ = inv_after
-                delta_l = abs(lq_after - lq_before)
-                delta_e = abs(eq_after - eq_before)
-                qty = max(delta_l, delta_e)
-            except Exception:
-                qty = None
-        def _norm_delta(text: str | None) -> str | None:
-            if text is None:
+        trace = ctx.get("trace")
+        if not trace or not self._bot_id:
+            return
+        ts_val = decision_ts or ctx.get("ts") or getattr(self.state, "last_ob_ts", None) or time.time()
+        def _format_inv(inv_data):
+            if not inv_data or not isinstance(inv_data, (list, tuple)) or len(inv_data) < 4:
                 return None
-            # normalize delta marker to "Δ -> x%"
-            return re.sub(r"Δ\s*:\s*", "Δ -> ", text)
-        inv_before_str = _norm_delta(inv_before_str)
-        inv_after_str = _norm_delta(inv_after_str) if inv_after_str is not None else None
-        def _fill_str(venue_key):
-            if not fill_info or venue_key not in fill_info:
-                return f"{venue_key}:latOrder=/ latFill="
-            info = fill_info.get(venue_key, {})
-            lo = info.get("lat_order", "")
-            lf = info.get("lat_fill", "")
-            return f"{venue_key}:latOrder={lo} latFill={lf}"
-        fill_L = _fill_str("L")
-        fill_E = _fill_str("E")
-        spread_inv_before = ""
-        spread_inv_after = ""
-        line = (
-            f"{ts_readable},{reason}:{dir_label},{ob_str_L},{ob_str_E},"
-            f"{inv_before_str},{inv_after_str},"
-            f"{fill_L} | {fill_E},"
-            f"{spread_inv_before},{spread_inv_after},qty={qty}"
-        )
+            qty_v1, price_v1, qty_v2, price_v2 = inv_data[:4]
+            return {
+                "qty_v1": qty_v1,
+                "price_v1": price_v1,
+                "qty_v2": qty_v2,
+                "price_v2": price_v2,
+            }
+
+        def _ob_snapshot(ob):
+            if not isinstance(ob, dict):
+                return {"ts": None, "bidPrice": None, "bidSize": None, "askPrice": None, "askSize": None}
+            return {
+                "ts": ob.get("timestamp"),
+                "bidPrice": ob.get("bidPrice"),
+                "bidSize": ob.get("bidSize"),
+                "askPrice": ob.get("askPrice"),
+                "askSize": ob.get("askSize"),
+            }
+        decision_data = {
+            "ts": ts_val,
+            "reason": ctx.get("reason"),
+            "direction": ctx.get("dir"),
+            "spread_signal": ctx.get("spread_signal"),
+            "size": ctx.get("qty"),
+        }
+        decision_data["inv_before"] = _format_inv(ctx.get("inv_before"))
+        decision_data["inv_after"] = _format_inv(inv_after)
+        ob_v1 = _ob_snapshot(ctx.get("ob_snapshot_L") or self.L.ob)
+        ob_v2 = _ob_snapshot(ctx.get("ob_snapshot_E") or self.E.ob)
+        db = await self._get_db_client()
+        if not db:
+            return
         try:
-            db = await self._get_db_client()
-            if not db:
-                raise RuntimeError("DB client unavailable for decision log")
-            await db.upsert_decision(
-                trace=ctx.get("trace"),
-                ts=self._ts_as_dt(ctx.get("ts")),
-                bot_name=self.bot_name,
-                ob_l=ob_str_L,
-                ob_e=ob_str_E,
-                inv_before=inv_before_json or inv_before_str,
-                inv_after=inv_after_json or inv_after_str,
-                reason=reason,
-                direction=dir_label,
-                spread_signal=ctx.get("spread_signal"),
-                size=qty if qty not in ("", None) else None,
-            )
-            log_label = "[INSERT DECISION]" if initial else "[UPDATE DECISION]"
-            try:
-                inv_l_state = getattr(self.state, "invL", None)
-                inv_e_state = getattr(self.state, "invE", None)
-                price_l_state = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", None))
-                price_e_state = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", None))
-                logger_db.info(
-                    f"{log_label} {ctx.get('trace')} "
-                    f"invL={inv_l_state}@{price_l_state} invE={inv_e_state}@{price_e_state}"
-                )
-            except Exception:
-                logger_db.info(
-                    f"{log_label} {ctx.get('trace')} {reason} {dir_label} {qty if qty is not None else 'N/A'} {ctx.get('spread_signal')}"
-                )
+            if initial:
+                await db.init_trace(self._bot_id, trace, self._bot_config_payload, decision_data, ob_v1, ob_v2)
+                logger_db.info(f"[INSERT DECISION] {trace}")
+            else:
+                await db.update_trace_section(self._bot_id, trace, "decision_data", decision_data)
+                await db.update_trace_section(self._bot_id, trace, "decision_ob_v1", ob_v1)
+                await db.update_trace_section(self._bot_id, trace, "decision_ob_v2", ob_v2)
+                logger_db.info(f"[UPDATE DECISION] {trace}")
         except Exception:
             logger_db.exception("[ERROR INSERT DECISION]")
 
-    async def _push_trade_db(self, trace: str, ts: float, venue: str, size: float,
-                             ob_price: float, exec_price: float, lat_order: float,
-                             reason: str | None = None, direction: str | None = None,
+    async def _push_trade_db(self, trace: str, venue: str,
+                             ts_start: float | None, ts_end: float | None,
+                             payload, resp,
+                             lat: float | None = None,
                              status: str | None = None,
-                             payload: str | None = None, resp: str | None = None):
+                             reason: str | None = None,
+                             direction: str | None = None,
+                             size: float | None = None):
         db = await self._get_db_client()
-        if not db:
+        if not db or not self._bot_id:
             logger_db.error("[ERROR INSERT TRADE] DB unavailable")
             return
+        section = self._trace_section_name("trade", venue)
+        data = {
+            "ts_start": ts_start,
+            "ts_end": ts_end,
+            "payload": payload,
+            "resp": resp,
+            "lat": lat,
+            "status": status,
+            "reason": reason,
+            "direction": direction,
+            "size": size,
+        }
         try:
-            await db.insert_trade(
-                trace=trace,
-                ts=self._ts_as_dt(ts),
-                bot_name=self.bot_name,
-                venue=venue,
-                size=size,
-                ob_price=ob_price,
-                exec_price=exec_price,
-                lat_order=lat_order,
-                reason=reason,
-                direction=direction,
-                status=status,
-                payload=payload,
-                resp=resp,
-            )
+            await db.update_trace_section(self._bot_id, trace, section, data)
             logger_db.info(f"[INSERT TRADE] {trace} {venue}")
         except Exception:
             logger_db.exception("[ERROR INSERT TRADE]")
 
-    async def _push_fill_db(self, trace: str, ts: float, venue: str,
-                            base_amount: float, fill_price: float, latency: float):
+    async def _push_fill_db(self, trace: str, venue: str, ts: float | None, size: float | None, fill_price: float | None = None):
         db = await self._get_db_client()
-        if not db:
+        if not db or not self._bot_id:
             logger_db.error("[ERROR INSERT FILL] DB unavailable")
             return
+        section = self._trace_section_name("fill", venue)
+        payload = {"ts": ts, "size": size, "fill_price": fill_price}
         try:
-            await db.insert_fill(
-                trace=trace,
-                ts=self._ts_as_dt(ts),
-                bot_name=self.bot_name,
-                venue=venue,
-                base_amount=base_amount,
-                fill_price=fill_price,
-                latency=latency,
-            )
-            logger_db.info(f"[INSERT FILL] {trace} {venue} {base_amount} {fill_price}")
+            await db.update_trace_section(self._bot_id, trace, section, payload)
+            logger_db.info(f"[INSERT FILL] {trace} {venue} {size}")
         except Exception:
             logger_db.exception("[ERROR INSERT FILL]")
 
@@ -1203,9 +1135,11 @@ class TTBot:
             signal_perf = self.state.last_trade_ctx.get("signal_perf")
         if signal_perf is None:
             signal_perf = getattr(self.state, "last_signal_perf", None)
+        start_wall = time.time()
         start_perf = time.perf_counter()
         result = await venue_api.send_market(d.side, size, price)
         end_perf = time.perf_counter()
+        end_wall = time.time()
         send_elapsed_ms = (end_perf - start_perf) * 1000
         overall_latency_ms = send_elapsed_ms
         if signal_perf is not None:
@@ -1223,6 +1157,8 @@ class TTBot:
                 "status": "ERROR",
                 "payload": None,
                 "resp": "send_market returned None",
+                "ts_start": start_wall,
+                "ts_end": end_wall,
             }
         result_status = "OK"
         result_payload = None
@@ -1267,6 +1203,8 @@ class TTBot:
             "status": result_status,
             "payload": str(result_payload) if result_payload is not None else None,
             "resp": str(result_resp) if result_resp is not None else None,
+            "ts_start": start_wall,
+            "ts_end": end_wall,
         }
 
     def start_heartbeat(self) -> asyncio.Task | None:
@@ -1420,6 +1358,10 @@ class TTBot:
             return 0.0
         return shared
 
+    def _trace_section_name(self, prefix: str, venue_key: str) -> str:
+        suffix = "v1" if venue_key == "L" else "v2"
+        return f"{prefix}_{suffix}"
+
     async def _get_db_client(self):
         if self.db_client is not None:
             return self.db_client
@@ -1440,11 +1382,10 @@ class TTBot:
 
 
 def _load_env_files():
-    for fname in [".env_bot", ".env_server"]:
-        env_path = PROJECT_ROOT / fname
-        if not env_path.exists():
-            continue
-        with env_path.open() as f:
+    def _load_from(path: Path):
+        if not path.exists():
+            return
+        with path.open() as f:
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1455,11 +1396,27 @@ def _load_env_files():
                 if k and k not in os.environ:
                     os.environ[k] = v
 
+    _load_from(PROJECT_ROOT / ".env_server")
+    env_dir = PROJECT_ROOT / "env"
+    if env_dir.exists():
+        for env_path in sorted(env_dir.glob(".env_*")):
+            _load_from(env_path)
+
+
+def _strip_sym_val(raw: str | None) -> str:
+    if not raw:
+        return ""
+    if ":" in raw:
+        return raw.split(":", 1)[1]
+    return raw.strip()
+
 
 def _pick_cfg(symbols_cfg, sym_l: str | None, sym_e: str | None):
     if sym_l:
         for item in symbols_cfg:
-            if item.get("SYMBOL_LIGHTER") == sym_l and (sym_e is None or item.get("SYMBOL_EXTENDED") == sym_e):
+            item_l = _strip_sym_val(item.get("SYM_VENUE1"))
+            item_e = _strip_sym_val(item.get("SYM_VENUE2"))
+            if item_l == sym_l and (sym_e is None or item_e == sym_e):
                 return item
     return symbols_cfg[0] if symbols_cfg else {}
 
@@ -1510,13 +1467,17 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
     arg_symL = symbol_l if symbol_l is not None else (sys.argv[1] if len(sys.argv) > 1 else None)
     arg_symE = symbol_e if symbol_e is not None else (sys.argv[2] if len(sys.argv) > 2 else None)
     cfg_item = _pick_cfg(symbols_cfg, arg_symL, arg_symE)
-    symbolL = cfg_item.get("SYMBOL_LIGHTER", arg_symL or "MEGA")
-    symbolE = cfg_item.get("SYMBOL_EXTENDED", arg_symE or "MEGA-USD")
+    symbolL = cfg_item.get("SYM_VENUE1", arg_symL or "MEGA")
+    symbolE = cfg_item.get("SYM_VENUE2", arg_symE or "MEGA-USD")
+    symbolL = _strip_sym_val(symbolL)
+    symbolE = _strip_sym_val(symbolE)
 
     _configure_console_logging()
 
     state = State()
     state.last_ob_ts = None
+    state.last_fill_ts_L = None
+    state.last_fill_ts_E = None
     state.tt_min_hits = int(cfg_item.get("MIN_HITS", os.getenv("MIN_HITS", "3")))
     sig_cap = cfg_item.get("MAX_TRADES", os.getenv("MAX_TRADES", None))
     if sig_cap is not None:
@@ -1570,6 +1531,7 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
         heartbeat_enabled=heartbeat_enabled,
         heartbeat_interval=heartbeat_interval,
         slippage=slippage,
+        bot_config=cfg_item,
     )
     logging.getLogger("_TT").info(
         "[CONFIG] L=%s E=%s minSpread=%s spreadTP=%s "
@@ -1637,6 +1599,7 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
 
         def on_inv_l(delta):
             prev_qty = state.invL
+            state.last_fill_ts_L = time.time()
             order_lat = getattr(state, "last_send_latency_L", None)
             fill_lat = None
             ts = getattr(state, "last_send_ts_L", None)
@@ -1659,6 +1622,7 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
 
         def on_inv_e(delta):
             prev_qty = state.invE
+            state.last_fill_ts_E = time.time()
             order_lat = getattr(state, "last_send_latency_E", None)
             fill_lat = None
             ts = getattr(state, "last_send_ts_E", None)

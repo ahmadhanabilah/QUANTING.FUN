@@ -34,7 +34,10 @@ class TTBot:
                  minSpread, spreadTP,
                  max_position_value=None,
                  max_trade_value=None,
-                 max_of_ob: float = 0.3):
+                 max_of_ob: float = 0.3,
+                 heartbeat_enabled: bool = False,
+                 heartbeat_interval: float = 60.0,
+                 slippage: float = SLIPPAGE_DEFAULT):
         self.state              = state
         self.L                  = lighter
         self.E                  = extended
@@ -73,9 +76,40 @@ class TTBot:
         # track position WS updates so we can gate new trades until fresh snapshots land
         self._pos_seq           = {"L": 0, "E": 0}
         self._pos_wait_targets  = None
+        self._pos_wait_qty      = None
         self._waiting_for_positions = False
         self._pending_position_ctx = None
         self._streams_ready_logged = False
+        self._heartbeat_enabled = heartbeat_enabled
+        self._heartbeat_interval = heartbeat_interval
+        self._heartbeat_task = None
+        self._heartbeat_ready_L = not heartbeat_enabled
+        self._heartbeat_ready_E = not heartbeat_enabled
+        self._heartbeat_ready_logged = False
+        self.slippage = slippage
+
+    def _log_state_update(self, source: str, *, inv_l=None, price_l=None, inv_e=None, price_e=None):
+        """Log inventory/price state mutations for traceability."""
+        try:
+            parts = []
+            def _fmt(label, val_pair):
+                try:
+                    before, after = val_pair
+                    return f"{label}:{before}->{after}"
+                except Exception:
+                    return f"{label}:{val_pair}"
+            if inv_l is not None:
+                parts.append(_fmt("invL", inv_l))
+            if price_l is not None:
+                parts.append(_fmt("priceInvL", price_l))
+            if inv_e is not None:
+                parts.append(_fmt("invE", inv_e))
+            if price_e is not None:
+                parts.append(_fmt("priceInvE", price_e))
+            if parts:
+                logger_tt.info("[STATE UPDATE] %s %s", source, " | ".join(parts))
+        except Exception:
+            pass
 
     async def loop(self):
         """Call this on every OB update."""
@@ -90,6 +124,12 @@ class TTBot:
             return
         else:
             self._streams_ready_logged = False
+        if self._heartbeat_enabled and not (self._heartbeat_ready_L and self._heartbeat_ready_E):
+            if not self._heartbeat_ready_logged:
+                logger_tt.info("[WAITING] heartbeat pending before trading")
+                self._heartbeat_ready_logged = True
+            return
+        self._heartbeat_ready_logged = False
         if not getattr(self, "_ready_logged", False):
             logger_tt.info("[READY TO LOOP] positions synced for L/E; trading can proceed")
             self._ready_logged = True
@@ -292,7 +332,7 @@ class TTBot:
                     ob_prices = []
                     exec_prices = []
                     def _slip_factor(_venue_api):
-                        return SLIPPAGE_DEFAULT
+                        return self.slippage
                     spread_val = self._last_spreads.get(reasons[0]) if self._last_spreads else None
                     dir_label = getattr(decision[0], "direction", None)
                     if reasons[0] == "TT_LE":
@@ -301,6 +341,44 @@ class TTBot:
                         hist = getattr(self.state, "tt_el_exit_history" if dir_label == "exit" else "tt_el_history", []) or []
                     hist_str = "[" + ", ".join(f"{h.get('spread', 0):.4f}" for h in hist) + "]" if hist else "[]"
                     spread_str = f"{spread_val:.2f}%" if spread_val is not None else "N/A"
+                    # adjust exit size to not leave sub-minimum dust
+                    dir_label = getattr(decision[0], "direction", None)
+                    if dir_label == "exit":
+                        try:
+                            curL = abs(getattr(self.state, "invL", 0) or 0)
+                            curE = abs(getattr(self.state, "invE", 0) or 0)
+                            sig_sz = shared or getattr(decision[0], "_tt_size", None) or getattr(decision[1], "_tt_size", None) or 0
+                            if sig_sz:
+                                orig_size = sig_sz
+                                size = min(sig_sz, curL, curE)
+                                price_L = self.L.ob["askPrice"] if self.state.invL < 0 else self.L.ob["bidPrice"]
+                                price_E = self.E.ob["askPrice"] if self.state.invE < 0 else self.E.ob["bidPrice"]
+                                minL = max(
+                                    (getattr(self.L, "min_size", 0) or 0),
+                                    ((getattr(self.L, "min_value", 0) or 0) / price_L) if price_L else 0,
+                                )
+                                minE = max(
+                                    (getattr(self.E, "min_size", 0) or 0),
+                                    (getattr(self.E, "min_size_change", 0) or 0),
+                                    ((getattr(self.E, "min_value", 0) or 0) / price_E) if price_E else 0,
+                                )
+                                remL = curL - size
+                                remE = curE - size
+                                full_close = False
+                                if remL < minL or remE < minE:
+                                    size = min(curL, curE)
+                                    full_close = True
+                                if size > 0:
+                                    if size != orig_size:
+                                        logger_tt.info(
+                                            f"[TT SIZE EXIT ADJUST] dir={reasons[0]} orig={orig_size} -> {size} "
+                                            f"curL={curL} curE={curE} remL={curL-size} remE={curE-size} "
+                                            f"minL={minL:.6f} minE={minE:.6f} full_close={full_close}"
+                                        )
+                                    shared = size
+                        except Exception as exc:
+                            logger_tt.warning(f"[TT SIZE EXIT ADJUST] failed: {exc}")
+
                     for d in decision:
                         venue_api = self.L if d.venue.name == "L" else self.E
                         px_ob = venue_api.ob["askPrice"] if d.side.name == "LONG" else venue_api.ob["bidPrice"]
@@ -326,7 +404,7 @@ class TTBot:
                     # detailed consecutive snapshot already stored per hit
                     cons_list = hist
                     trace_val = getattr(self, "_current_trace", None) or getattr(self.state, "last_trade_ctx", {}).get("trace")
-                    logger_tt.info(f"[DECISION MADE] {trace_val} {reasons[0]} {dir_label}")
+                    logger_tt.info(f"[DECISION MADE] {trace_val} {reasons[0]} size={qty_log} {dir_label}")
                     # reset counters after firing
                     self.state.tt_le_hits = 0
                     self.state.tt_el_hits = 0
@@ -402,8 +480,41 @@ class TTBot:
             return True
         try:
             for venue_key, target in self._pos_wait_targets.items():
-                if self._pos_seq.get(venue_key, 0) < target:
+                seq_val = self._pos_seq.get(venue_key, 0)
+                if seq_val < target:
+                    # logger_tt.info(
+                    #     "[POS WAIT] waiting %s seq=%s target=%s pending_tt=%s",
+                    #     venue_key,
+                    #     seq_val,
+                    #     target,
+                    #     self._pending_tt,
+                    # )
                     return False
+            # qty check if targets set
+            if self._pos_wait_qty:
+                for venue_key, target_qty in self._pos_wait_qty.items():
+                    if target_qty is None:
+                        continue
+                    cur_qty = getattr(self.state, "invL" if venue_key == "L" else "invE", 0)
+                    tol = max(getattr(self, "_pending_tol", 1e-6), abs(target_qty) * 1e-4)
+                    if abs(cur_qty - target_qty) > tol:
+                        # logger_tt.info(
+                        #     "[POS WAIT QTY] %s cur=%s target=%s tol=%s pending_tt=%s",
+                        #     venue_key,
+                        #     cur_qty,
+                        #     target_qty,
+                        #     tol,
+                        #     self._pending_tt,
+                        # )
+                        return False
+            logger_tt.info(
+                "[POS SYNCED] L=%s/%s E=%s/%s pending_tt=%s",
+                self._pos_seq.get("L", 0),
+                self._pos_wait_targets.get("L"),
+                self._pos_seq.get("E", 0),
+                self._pos_wait_targets.get("E"),
+                self._pending_tt,
+            )
             return True
         except Exception:
             return False
@@ -445,14 +556,28 @@ class TTBot:
     def _on_position_update(self, venue_key: str, qty: float, entry: float):
         """Handle WS position snapshots to sync state + advance wait gates."""
         try:
+            prev_inv_l = getattr(self.state, "invL", None)
+            prev_inv_e = getattr(self.state, "invE", None)
+            prev_price_l = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", None))
+            prev_price_e = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", None))
             if venue_key == "L":
                 self.state.invL = qty
                 self.state.entry_price_L = entry
                 self.state.priceInvL = entry
+                self._log_state_update(
+                    "position_snapshot:L",
+                    inv_l=(prev_inv_l, self.state.invL),
+                    price_l=(prev_price_l, self.state.priceInvL),
+                )
             elif venue_key == "E":
                 self.state.invE = qty
                 self.state.entry_price_E = entry
                 self.state.priceInvE = entry
+                self._log_state_update(
+                    "position_snapshot:E",
+                    inv_e=(prev_inv_e, self.state.invE),
+                    price_e=(prev_price_e, self.state.priceInvE),
+                )
             self._pos_seq[venue_key] = self._pos_seq.get(venue_key, 0) + 1
         except Exception:
             pass
@@ -460,9 +585,30 @@ class TTBot:
             self._waiting_for_positions = False
             self._pos_wait_targets = None
         # if we were holding a decision context waiting for position prices, flush update now
+        # if positions arrived while a trade is pending, use them as the source of truth and finalize
+        pending_waiting_and_synced = (
+            getattr(self, "_pending_tt", None) is not None
+            and self._positions_synced()
+        )
+        if pending_waiting_and_synced:
+            logger_tt.info(
+                "[POS FINALIZE] synced positions; clearing pending_tt %s",
+                self._pending_tt,
+            )
+            try:
+                asyncio.create_task(self._log_trade_complete())
+            except Exception:
+                logger_tt.exception("[POS FINALIZE ERROR]")
+            self._pending_tt = None
+            self.state.last_send_latency_L = None
+            self.state.last_send_latency_E = None
+            self._waiting_for_positions = False
+            self._pos_wait_targets = None
+            self._pos_wait_qty = None
         if self._waiting_for_positions and self._positions_synced():
             self._waiting_for_positions = False
             self._pos_wait_targets = None
+            self._pos_wait_qty = None
             ctx_pending = self._pending_position_ctx or getattr(self.state, "last_trade_ctx", None)
             if ctx_pending:
                 inv_after_now = (
@@ -484,18 +630,40 @@ class TTBot:
                 self.state.last_trade_ctx = None
                 self._current_trace = None
 
-    def _mark_wait_for_positions(self):
+    def _mark_wait_for_positions(self, force: bool = False):
         """Expect next position snapshots before allowing further trades."""
         try:
+            # If already waiting, only refresh expected qty when forced; don't bump targets again.
+            if self._waiting_for_positions:
+                if force:
+                    pending = getattr(self, "_pending_tt", None) or {}
+                    self._pos_wait_qty = {
+                        "L": (getattr(self.state, "invL", 0.0) + pending.get("L", 0.0)) if pending else None,
+                        "E": (getattr(self.state, "invE", 0.0) + pending.get("E", 0.0)) if pending else None,
+                    }
+                return
+            # expected target qty based on current state + pending TT deltas
+            pending = getattr(self, "_pending_tt", None) or {}
+            self._pos_wait_qty = {
+                "L": (getattr(self.state, "invL", 0.0) + pending.get("L", 0.0)) if pending else None,
+                "E": (getattr(self.state, "invE", 0.0) + pending.get("E", 0.0)) if pending else None,
+            }
+            # If positions already advanced beyond these targets, we'll clear immediately on next check.
             self._pos_wait_targets = {
                 "L": self._pos_seq.get("L", 0) + 1,
                 "E": self._pos_seq.get("E", 0) + 1,
             }
             self._waiting_for_positions = True
+            # If targets already met (e.g., position snapshot arrived before we marked), clear immediately.
+            if self._positions_synced():
+                self._waiting_for_positions = False
+                self._pos_wait_targets = None
+                self._pos_wait_qty = None
         except Exception:
             # fail-open if tracking fails to avoid deadlock
             self._waiting_for_positions = False
             self._pos_wait_targets = None
+            self._pos_wait_qty = None
 
     async def _log_trade_complete(self, ctx_snapshot: dict | None = None):
         if self._trade_complete_logged:
@@ -525,12 +693,22 @@ class TTBot:
         )
         # clear entry prices when flat so logs don't show stale prices
         if inv_after[0] == 0:
+            prev_price_l = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0))
             self.state.entry_price_L = 0
             self.state.priceInvL = 0
+            self._log_state_update(
+                "trade_complete:flat_L",
+                price_l=(prev_price_l, self.state.priceInvL),
+            )
             inv_after = (0, 0, inv_after[2], inv_after[3])
         if inv_after[2] == 0:
+            prev_price_e = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0))
             self.state.entry_price_E = 0
             self.state.priceInvE = 0
+            self._log_state_update(
+                "trade_complete:flat_E",
+                price_e=(prev_price_e, self.state.priceInvE),
+            )
             inv_after = (inv_after[0], inv_after[1], 0, 0)
         qty_val = ctx.get("qty")
         if qty_val is None:
@@ -619,10 +797,17 @@ class TTBot:
         # Prefer WS account feed prices for inventory valuation when available
         entry_l_account = _entry_from_account(self.L, getattr(self.state, "entry_price_L", 0))
         entry_e_account = _entry_from_account(self.E, getattr(self.state, "entry_price_E", 0))
+        prev_price_l = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0))
+        prev_price_e = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0))
         self.state.entry_price_L = entry_l_account
         self.state.entry_price_E = entry_e_account
         self.state.priceInvL = entry_l_account
         self.state.priceInvE = entry_e_account
+        self._log_state_update(
+            "trade_complete:account_entry",
+            price_l=(prev_price_l, self.state.priceInvL),
+            price_e=(prev_price_e, self.state.priceInvE),
+        )
         inv_after = (
             self.state.invL,
             entry_l_account,
@@ -751,12 +936,22 @@ class TTBot:
                 return "N/A"
         def _inv_json(inv_tuple):
             lq, le, eq, ee = inv_tuple
-            return json.dumps(
-                [
+            if lq > 0 and eq < 0:
+                ordered = [
+                    {"venue": "L", "qty": lq, "price": le},
+                    {"venue": "E", "qty": eq, "price": ee},
+                ]
+            elif eq > 0 and lq < 0:
+                ordered = [
                     {"venue": "E", "qty": eq, "price": ee},
                     {"venue": "L", "qty": lq, "price": le},
                 ]
-            )
+            else:
+                ordered = [
+                    {"venue": "L", "qty": lq, "price": le},
+                    {"venue": "E", "qty": eq, "price": ee},
+                ]
+            return json.dumps(ordered)
         def _inv_block(inv_tuple, spread_val=None, fill_info_local=None, include_lat: bool = True):
             lq, le, eq, ee = inv_tuple
             spread_inv = 0.0
@@ -777,7 +972,13 @@ class TTBot:
                 line_e = f"E -> Qty: {eq}, Price: {_fmt_price_local(ee)}"
                 line_l = f"L -> Qty: {lq}, Price: {_fmt_price_local(le)}"
             line_spread = f"Δ -> {spread_inv if spread_val is None else spread_val:.2f}%"
-            return " | ".join([line_e, line_l, line_spread])
+            if lq > 0 and eq < 0:
+                ordered_lines = [line_l, line_e]
+            elif eq > 0 and lq < 0:
+                ordered_lines = [line_e, line_l]
+            else:
+                ordered_lines = [line_l, line_e]
+            return " | ".join(ordered_lines + [line_spread])
 
         ts_readable = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ctx.get("ts", time.time())))
         reason = ctx.get("reason", "")
@@ -787,16 +988,17 @@ class TTBot:
         obE = getattr(self.E, "ob", {})
         ob_str_L = f"{obL.get('bidPrice')}/{obL.get('askPrice')}"
         ob_str_E = f"{obE.get('bidPrice')}/{obE.get('askPrice')}"
-        # use the snapshot captured when the trade was initiated so we don't overwrite with newer state
+        # Use snapshot captured at decision time if available; fallback to current state
         inv_before_ctx = ctx.get("inv_before")
         if inv_before_ctx is None:
-            inv_before_ctx = (
+            inv_before = (
                 getattr(self.state, "invL", 0.0),
                 getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0.0)),
                 getattr(self.state, "invE", 0.0),
                 getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0.0)),
             )
-        inv_before = _hydrate_inv(inv_before_ctx)
+        else:
+            inv_before = inv_before_ctx
         inv_before_str = _inv_block(inv_before, spread_val=ctx.get("spread_signal"), fill_info_local=None, include_lat=False)
         # for inv_after, compute spread from actual entry prices instead of reusing signal spread
         # match inv_before formatting: omit order/fill latency details
@@ -807,17 +1009,6 @@ class TTBot:
                 getattr(self.state, "invE", 0.0),
                 getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0.0)),
             )
-        else:
-            try:
-                lq, le, eq, ee = inv_after
-                inv_after = (
-                    lq,
-                    getattr(self.state, "priceInvL", le),
-                    eq,
-                    getattr(self.state, "priceInvE", ee),
-                )
-            except Exception:
-                pass
         inv_after_str = "" if inv_after is None else _inv_block(inv_after, spread_val=None, fill_info_local=None, include_lat=False)
         inv_before_json = _inv_json(inv_before) if inv_before is not None else None
         inv_after_json = _inv_json(inv_after) if inv_after is not None else None
@@ -872,9 +1063,19 @@ class TTBot:
                 size=qty if qty not in ("", None) else None,
             )
             log_label = "[INSERT DECISION]" if initial else "[UPDATE DECISION]"
-            logger_db.info(
-                f"{log_label} {ctx.get('trace')} {reason} {dir_label} {qty if qty is not None else 'N/A'} {ctx.get('spread_signal')}"
-            )
+            try:
+                inv_l_state = getattr(self.state, "invL", None)
+                inv_e_state = getattr(self.state, "invE", None)
+                price_l_state = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", None))
+                price_e_state = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", None))
+                logger_db.info(
+                    f"{log_label} {ctx.get('trace')} "
+                    f"invL={inv_l_state}@{price_l_state} invE={inv_e_state}@{price_e_state}"
+                )
+            except Exception:
+                logger_db.info(
+                    f"{log_label} {ctx.get('trace')} {reason} {dir_label} {qty if qty is not None else 'N/A'} {ctx.get('spread_signal')}"
+                )
         except Exception:
             logger_db.exception("[ERROR INSERT DECISION]")
 
@@ -947,6 +1148,8 @@ class TTBot:
                     shared_sz = self._compute_tt_shared_size_pair(d.reason)
                 signed_sz = shared_sz if d.side == Side.LONG else -shared_sz
                 self._pending_tt[d.venue.name] = self._pending_tt.get(d.venue.name, 0.0) + signed_sz
+                # refresh position wait targets to include all pending legs
+                self._mark_wait_for_positions(force=True)
             return await self._send_market(d, log_decision=log_decision)
 
 
@@ -962,7 +1165,7 @@ class TTBot:
         # compute aggressive price with slippage applied (what send_market will use)
         ob_price = venue_api.ob["askPrice"] if d.side.name == "LONG" else venue_api.ob["bidPrice"]
         price = ob_price
-        slippage = SLIPPAGE_DEFAULT
+        slippage = self.slippage
         if slippage and ob_price:
             if d.side.name == "LONG":
                 price = ob_price * (1 + slippage)
@@ -1066,6 +1269,48 @@ class TTBot:
             "resp": str(result_resp) if result_resp is not None else None,
         }
 
+    def start_heartbeat(self) -> asyncio.Task | None:
+        """Start the heartbeat task that periodically sends a deep order."""
+        if not self._heartbeat_enabled or self._heartbeat_task:
+            return self._heartbeat_task
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(self._heartbeat_interval))
+        return self._heartbeat_task
+
+    async def _heartbeat_loop(self, interval: float) -> None:
+        first_send = True
+        while True:
+            if not first_send:
+                await asyncio.sleep(interval)
+            first_send = False
+            try:
+                await self._send_order_heartbeat()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger_tt.exception("[HEARTBEAT] error sending order")
+
+    async def _send_order_heartbeat(self) -> None:
+        await self._send_market_heartbeat("L", self.L)
+        await self._send_market_heartbeat("E", self.E)
+
+    async def _send_market_heartbeat(self, venue_key: str, venue_api) -> None:
+        bid = venue_api.ob.get("bidPrice") or 0.0
+        if not bid:
+            logger_tt.debug("[HEARTBEAT] %s bid unavailable, skipping", venue_key)
+            return
+        price = bid * 0.2  # 80% below the current bid
+        min_size = getattr(venue_api, "min_size", 0) or 0
+        undersized = (min_size or 0.002) * 0.5
+        size = undersized if undersized > 0 else 0.0001
+        start_ts = time.perf_counter()
+        result = await venue_api.send_market(Side.LONG, size, price, is_heartbeat=True)
+        latency_ms = (time.perf_counter() - start_ts) * 1000
+        if venue_key == "L":
+            self._heartbeat_ready_L = True
+        else:
+            self._heartbeat_ready_E = True
+        # logger_tt.info("[HEARTBEAT] %s sent LONG")
+
     def _compute_tt_shared_size_pair(self, reason: str) -> float:
         """
         Compute TT size using a shared minimum:
@@ -1084,7 +1329,7 @@ class TTBot:
             ob_px = venue_api.ob["askPrice"] if side == Side.LONG else venue_api.ob["bidPrice"]
             if not ob_px:
                 return None, None
-            slip = SLIPPAGE_DEFAULT or 0.0
+            slip = self.slippage or 0.0
             if slip:
                 if side == Side.LONG:
                     return ob_px, ob_px * (1 + slip)
@@ -1195,11 +1440,10 @@ class TTBot:
 
 
 def _load_env_files():
-    for fname in [".env_bot", ".env_server"]:
-        env_path = PROJECT_ROOT / fname
-        if not env_path.exists():
-            continue
-        with env_path.open() as f:
+    def _load_from(path: Path):
+        if not path.exists():
+            return
+        with path.open() as f:
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1210,11 +1454,27 @@ def _load_env_files():
                 if k and k not in os.environ:
                     os.environ[k] = v
 
+    _load_from(PROJECT_ROOT / ".env_server")
+    env_dir = PROJECT_ROOT / "env"
+    if env_dir.exists():
+        for env_path in sorted(env_dir.glob(".env_*")):
+            _load_from(env_path)
+
+
+def _strip_sym_val(raw: str | None) -> str:
+    if not raw:
+        return ""
+    if ":" in raw:
+        return raw.split(":", 1)[1]
+    return raw.strip()
+
 
 def _pick_cfg(symbols_cfg, sym_l: str | None, sym_e: str | None):
     if sym_l:
         for item in symbols_cfg:
-            if item.get("SYMBOL_LIGHTER") == sym_l and (sym_e is None or item.get("SYMBOL_EXTENDED") == sym_e):
+            item_l = _strip_sym_val(item.get("SYM_VENUE1"))
+            item_e = _strip_sym_val(item.get("SYM_VENUE2"))
+            if item_l == sym_l and (sym_e is None or item_e == sym_e):
                 return item
     return symbols_cfg[0] if symbols_cfg else {}
 
@@ -1265,8 +1525,10 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
     arg_symL = symbol_l if symbol_l is not None else (sys.argv[1] if len(sys.argv) > 1 else None)
     arg_symE = symbol_e if symbol_e is not None else (sys.argv[2] if len(sys.argv) > 2 else None)
     cfg_item = _pick_cfg(symbols_cfg, arg_symL, arg_symE)
-    symbolL = cfg_item.get("SYMBOL_LIGHTER", arg_symL or "MEGA")
-    symbolE = cfg_item.get("SYMBOL_EXTENDED", arg_symE or "MEGA-USD")
+    symbolL = cfg_item.get("SYM_VENUE1", arg_symL or "MEGA")
+    symbolE = cfg_item.get("SYM_VENUE2", arg_symE or "MEGA-USD")
+    symbolL = _strip_sym_val(symbolL)
+    symbolE = _strip_sym_val(symbolE)
 
     _configure_console_logging()
 
@@ -1299,6 +1561,18 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
     except Exception:
         pass
 
+    heartbeat_enabled = str(cfg_item.get("ORDER_HEARTBEAT_ENABLED", os.getenv("ORDER_HEARTBEAT_ENABLED", "false"))).lower() == "true"
+    heartbeat_interval_raw = cfg_item.get("ORDER_HEARTBEAT_INTERVAL", os.getenv("ORDER_HEARTBEAT_INTERVAL", "60"))
+    slippage_val = cfg_item.get("SLIPPAGE", os.getenv("SLIPPAGE", str(SLIPPAGE_DEFAULT)))
+    try:
+        heartbeat_interval = float(heartbeat_interval_raw)
+    except Exception:
+        heartbeat_interval = 60.0
+    try:
+        slippage = float(slippage_val)
+    except Exception:
+        slippage = SLIPPAGE_DEFAULT
+
     maker_bot = TTBot(
         state=state,
         lighter=L,
@@ -1310,11 +1584,15 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
         max_position_value=cfg_item.get("MAX_POSITION_VALUE", 500),
         max_trade_value=cfg_item.get("MAX_TRADE_VALUE", None),
         max_of_ob=float(cfg_item.get("MAX_OF_OB", 0.3)),
+        heartbeat_enabled=heartbeat_enabled,
+        heartbeat_interval=heartbeat_interval,
+        slippage=slippage,
     )
     logging.getLogger("_TT").info(
         "[CONFIG] L=%s E=%s minSpread=%s spreadTP=%s "
         "maxPosValue=%s minHits=%s dedup=%s warmUp=%s maxTrades=%s "
-        "minSizeL=%s minSizeE=%s minValueL=%s minSizeChangeE=%s",
+        "minSizeL=%s minSizeE=%s minValueL=%s minSizeChangeE=%s "
+        "heartbeat=%s interval=%s slippage=%s",
         symbolL,
         symbolE,
         maker_bot.minSpread,
@@ -1328,36 +1606,12 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
         getattr(E, "min_size", None),
         getattr(L, "min_value", None),
         getattr(E, "min_size_change", None),
+        heartbeat_enabled,
+        heartbeat_interval,
+        slippage,
     )
 
     async def maker_loop():
-        def maybe_finalize_trade():
-            ctx = getattr(state, "last_trade_ctx", None)
-            if not ctx:
-                return
-            pending = getattr(maker_bot, "_pending_tt", None) or {}
-            qty_ctx = abs(ctx.get("qty") or 0.0)
-            tol_local = max(getattr(maker_bot, "_pending_tol", 1e-6), qty_ctx * 1e-4)
-            if pending and any(abs(v) > tol_local for v in pending.values()):
-                return
-            if not maker_bot._waiting_for_positions:
-                maker_bot._mark_wait_for_positions()
-
-            async def _finalize():
-                try:
-                    logger_tt.info(
-                        "[BOTH VENUES FILLED] "
-                        f"L:{state.invL}@{getattr(state, 'priceInvL', getattr(state, 'entry_price_L', 0))} "
-                        f"E:{state.invE}@{getattr(state, 'priceInvE', getattr(state, 'entry_price_E', 0))}"
-                    )
-                    await maker_bot._log_trade_complete()
-                finally:
-                    maker_bot._pending_tt = None
-                    state.last_send_latency_L = None
-                    state.last_send_latency_E = None
-
-            asyncio.create_task(_finalize())
-
         def on_update():
             state.last_ob_ts = time.time()
             if L.ob["bidPrice"] and L.ob["askPrice"] and E.ob["bidPrice"] and E.ob["askPrice"]:
@@ -1400,19 +1654,6 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
 
         def on_inv_l(delta):
             prev_qty = state.invL
-            prev_entry = getattr(state, "entry_price_L", 0)
-            pending_ref = (maker_bot._pending_tt or {}).get("L")
-            if pending_ref and abs(delta) > abs(pending_ref) * 1.1:
-                delta = math.copysign(abs(pending_ref), delta)
-            state.invL += delta
-            if abs(state.invL) < 1e-9:
-                state.invL = 0.0
-            if getattr(maker_bot, "_pending_tt", None) is None:
-                maker_bot._pending_tt = {}
-            maker_bot._pending_tt["L"] = maker_bot._pending_tt.get("L", 0.0) - delta
-            ctx_qty = getattr(state, "last_trade_ctx", {}).get("qty") or 0.0
-            base_tol = getattr(maker_bot, "_pending_tol", 1e-3)
-            tol = max(base_tol, abs(ctx_qty) * 1e-4)
             order_lat = getattr(state, "last_send_latency_L", None)
             fill_lat = None
             ts = getattr(state, "last_send_ts_L", None)
@@ -1428,30 +1669,13 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
             flat = f"{fill_lat:.0f}" if fill_lat is not None else "N/A"
             state.last_fill_price_L = last_px
             state.last_fill_latency_L = fill_lat
-            new_qty = state.invL
+            maker_bot._log_state_update("fill:L", inv_l=(prev_qty, prev_qty))
             trace_val = getattr(maker_bot, "_current_trace", None) or getattr(state, "last_trade_ctx", {}).get("trace") or "unknown"
             logger_tt.info(f"[FILLED LIG] {trace_val}")
-            if abs(maker_bot._pending_tt.get("L", 0.0)) < tol:
-                maker_bot._pending_tt["L"] = 0.0
-            if abs(maker_bot._pending_tt.get("E", 0.0)) < tol:
-                maker_bot._pending_tt["E"] = 0.0
-            maybe_finalize_trade()
+            maker_bot._mark_wait_for_positions(force=False)
 
         def on_inv_e(delta):
             prev_qty = state.invE
-            prev_entry = getattr(state, "entry_price_E", 0)
-            pending_ref = (maker_bot._pending_tt or {}).get("E")
-            if pending_ref and abs(delta) > abs(pending_ref) * 1.1:
-                delta = math.copysign(abs(pending_ref), delta)
-            state.invE += delta
-            if abs(state.invE) < 1e-9:
-                state.invE = 0.0
-            if getattr(maker_bot, "_pending_tt", None) is None:
-                maker_bot._pending_tt = {}
-            maker_bot._pending_tt["E"] = maker_bot._pending_tt.get("E", 0.0) - delta
-            ctx_qty = getattr(state, "last_trade_ctx", {}).get("qty") or 0.0
-            base_tol = getattr(maker_bot, "_pending_tol", 1e-3)
-            tol = max(base_tol, abs(ctx_qty) * 1e-4)
             order_lat = getattr(state, "last_send_latency_E", None)
             fill_lat = None
             ts = getattr(state, "last_send_ts_E", None)
@@ -1467,19 +1691,19 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
             flat = f"{fill_lat:.0f}" if fill_lat is not None else "N/A"
             state.last_fill_price_E = last_px
             state.last_fill_latency_E = fill_lat
-            new_qty = state.invE
+            maker_bot._log_state_update("fill:E", inv_e=(prev_qty, prev_qty))
             trace_val = getattr(maker_bot, "_current_trace", None) or getattr(state, "last_trade_ctx", {}).get("trace") or "unknown"
             logger_tt.info(f"[FILLED EXT] {trace_val}")
-            if abs(maker_bot._pending_tt.get("L", 0.0)) < tol:
-                maker_bot._pending_tt["L"] = 0.0
-            if abs(maker_bot._pending_tt.get("E", 0.0)) < tol:
-                maker_bot._pending_tt["E"] = 0.0
-            maybe_finalize_trade()
+            maker_bot._mark_wait_for_positions(force=False)
 
         L.set_inventory_callback(on_inv_l)
         E.set_inventory_callback(on_inv_e)
         L.set_position_state_callback(lambda qty, entry: maker_bot._on_position_update("L", qty, entry))
         E.set_position_state_callback(lambda qty, entry: maker_bot._on_position_update("E", qty, entry))
+        prev_inv_l = getattr(state, "invL", 0.0)
+        prev_inv_e = getattr(state, "invE", 0.0)
+        prev_price_l = getattr(state, "priceInvL", getattr(state, "entry_price_L", 0.0))
+        prev_price_e = getattr(state, "priceInvE", getattr(state, "entry_price_E", 0.0))
         l_qty, l_entry = await L.load_initial_position()
         e_qty, e_entry = await E.load_initial_position()
         state.invL = l_qty
@@ -1488,10 +1712,21 @@ async def run_tt_bot(symbol_l: str | None = None, symbol_e: str | None = None, c
         state.invE = e_qty
         state.entry_price_E = e_entry
         state.priceInvE = e_entry
+        maker_bot._log_state_update(
+            "init_positions",
+            inv_l=(prev_inv_l, state.invL),
+            price_l=(prev_price_l, state.priceInvL),
+            inv_e=(prev_inv_e, state.invE),
+            price_e=(prev_price_e, state.priceInvE),
+        )
         logging.getLogger("_TT").info(
             f"[INIT] L:{l_qty}@{l_entry} | E:{e_qty}@{e_entry} | Δ:{_inv_spread():.4f}%"
         )
-        await asyncio.gather(L.start(), E.start())
+        tasks = [L.start(), E.start()]
+        heartbeat_task = maker_bot.start_heartbeat()
+        if heartbeat_task:
+            tasks.append(heartbeat_task)
+        await asyncio.gather(*tasks)
 
     await maker_loop()
 

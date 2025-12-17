@@ -129,7 +129,7 @@ class ExtendedWS:
                     logger.info(f"[SUBSCRIBED {self.symbol}]")
                     async with self._ws_client.subscribe_to_orderbooks(self.symbol, depth=1) as stream:
                         async for msg in stream:
-                            self._handle_orderbook(msg.data)
+                            self._handle_orderbook(msg)
                 except Exception as e:
                     logger.debug(f"OB stream error: {e}; reconnecting in 1s")
                     self.ob = {"bidPrice": 0.0, "askPrice": 0.0, "bidSize": 0.0, "askSize": 0.0}
@@ -158,8 +158,11 @@ class ExtendedWS:
 
     def _handle_orderbook(self, msg) -> None:
         try:
-            bid = msg.bid[0] if msg.bid else None
-            ask = msg.ask[0] if msg.ask else None
+            payload = getattr(msg, "data", msg)
+            if payload is None:
+                return
+            bid = payload.bid[0] if getattr(payload, "bid", None) else None
+            ask = payload.ask[0] if getattr(payload, "ask", None) else None
             if not bid or not ask:
                 return
 
@@ -168,6 +171,7 @@ class ExtendedWS:
                 "askPrice": float(ask.price),
                 "bidSize": float(bid.qty),
                 "askSize": float(ask.qty),
+                "timestamp": time.time(),
             }
             if self.dedup_ob and self.ob == new_ob:
                 return

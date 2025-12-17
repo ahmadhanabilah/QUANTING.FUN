@@ -279,6 +279,7 @@ class LighterWS:
                 "askPrice": float(ask["price"]),
                 "bidSize": float(bid["size"]),
                 "askSize": float(ask["size"]),
+                "timestamp": time.time(),
             }
 
             if getattr(self, "dedup_ob", False):

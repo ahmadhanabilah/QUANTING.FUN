@@ -7,8 +7,7 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
                      size_hint_le: float | None = None,
                      size_hint_el: float | None = None,
                      max_position_value: float | None = None,
-                     signals_remaining: int | None = None,
-                     return_ts: bool = False):
+                     signals_remaining: int | None = None):
     """
     TT-only logic (entries/exits). MT/TM paths removed.
     Adds warmup tags (WARM_UP_LE/WARM_UP_EL) for initial runs.
@@ -40,35 +39,30 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             return bool(size_hint_el and size_hint_el > 0)
         return False
 
-    def _wrap(decision):
-        if return_ts:
-            return decision, getattr(state, "last_ob_ts", None)
-        return decision
-
     # respect trade cap early
     if signals_remaining is not None and signals_remaining <= 0:
-        return _wrap(Decision(ActionType.NONE))
+        return Decision(ActionType.NONE)
 
     if warm_up_enabled:
         # gate normal logic until warm-up sequence completes
         if warm_stage == "LE_PENDING":
             if not _size_ok("WARM_UP_LE"):
-                return _wrap(Decision(ActionType.NONE))
+                return Decision(ActionType.NONE)
             _clear_direction()
-            return _wrap((
+            return (
                 _make_decision(Venue.L, Side.LONG, "WARM_UP_LE", "entry"),
                 _make_decision(Venue.E, Side.SHORT, "WARM_UP_LE", "entry"),
-            ))
+            )
         if warm_stage == "EL_PENDING":
             if not _size_ok("WARM_UP_EL"):
-                return _wrap(Decision(ActionType.NONE))
+                return Decision(ActionType.NONE)
             _clear_direction()
-            return _wrap((
+            return (
                 _make_decision(Venue.E, Side.LONG, "WARM_UP_EL", "exit"),
                 _make_decision(Venue.L, Side.SHORT, "WARM_UP_EL", "exit"),
-            ))
+            )
         if warm_stage in ("LE_INFLIGHT", "EL_INFLIGHT"):
-            return _wrap(Decision(ActionType.NONE))
+            return Decision(ActionType.NONE)
 
     # ----------------------------
     # 1) EXIT LOGIC (TT only)
@@ -100,12 +94,12 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             threshold = spreadTP - spread_inv
             if len(hist) >= tt_min_hits and all(h.get("spread", 0) > threshold for h in hist):
                 if not _size_ok("TT_EL"):
-                    return _wrap(Decision(ActionType.NONE))
+                    return Decision(ActionType.NONE)
                 _clear_direction()
-                return _wrap((
+                return (
                     _make_decision(Venue.E, Side.LONG, "TT_EL", "exit"),
                     _make_decision(Venue.L, Side.SHORT, "TT_EL", "exit"),
-                ))
+                )
         else:
             state.tt_el_exit_history = []
 
@@ -135,12 +129,12 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             threshold = spreadTP - spread_inv
             if len(hist) >= tt_min_hits and all(h.get("spread", 0) > threshold for h in hist):
                 if not _size_ok("TT_LE"):
-                    return _wrap(Decision(ActionType.NONE))
+                    return Decision(ActionType.NONE)
                 _clear_direction()
-                return _wrap((
+                return (
                     _make_decision(Venue.L, Side.LONG, "TT_LE", "exit"),
                     _make_decision(Venue.E, Side.SHORT, "TT_LE", "exit"),
-                ))
+                )
         else:
             state.tt_le_exit_history = []
 
@@ -215,11 +209,11 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
             best_key = k
 
     if best_key is None or best_val is None or best_val <= minSpread:
-        return _wrap(Decision(ActionType.NONE))
+        return Decision(ActionType.NONE)
 
     hits = getattr(state, tt_hits[best_key], 0)
     if hits < tt_min_hits:
-        return _wrap(Decision(ActionType.NONE))
+        return Decision(ActionType.NONE)
 
     # max exposure cap for entries only
     if max_position_value is not None and max_position_value > 0:
@@ -227,18 +221,18 @@ def logic_entry_exit(state, spreads, minSpread, spreadTP,
         val_e = abs(getattr(state, "invE", 0.0) * getattr(state, "entry_price_E", 0) or 0)
         max_val = max(val_l, val_e)
         if max_position_value == 0 or max_val >= max_position_value:
-            return _wrap(Decision(ActionType.NONE))
+            return Decision(ActionType.NONE)
 
     if not _size_ok(best_key):
-        return _wrap(Decision(ActionType.NONE))
+        return Decision(ActionType.NONE)
 
     _clear_direction()
     if best_key == "TT_LE":
-        return _wrap((
+        return (
             _make_decision(Venue.L, Side.LONG, "TT_LE", "entry"),
             _make_decision(Venue.E, Side.SHORT, "TT_LE", "entry"),
-        ))
-    return _wrap((
+        )
+    return (
         _make_decision(Venue.E, Side.LONG, "TT_EL", "entry"),
         _make_decision(Venue.L, Side.SHORT, "TT_EL", "entry"),
-    ))
+    )

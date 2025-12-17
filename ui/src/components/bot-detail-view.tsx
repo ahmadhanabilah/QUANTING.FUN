@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { TrendingUp, Settings, ListChecks, LayoutDashboard, Power, Trash2 } from 'lucide-react';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { Activity, TrendingUp, Settings, ListChecks, LayoutDashboard, Power, Trash2 } from 'lucide-react';
 import { DecisionsTable } from './decisions-table';
 import { TradesTable } from './trades-table';
 import { BotSettings } from './bot-settings';
+import { ActivitiesTable } from './activities-table';
+import { usePaginatedActivities } from '../hooks/use-paginated-activities';
 
 const NUMBER_FIELDS = [
   'MIN_SPREAD',
@@ -18,12 +20,14 @@ const NUMBER_FIELDS = [
 ];
 const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS', 'ORDER_HEARTBEAT_ENABLED'];
 
-export type DetailTab = 'dashboard' | 'decisions' | 'trades' | 'settings';
+export type DetailTab = 'dashboard' | 'decisions' | 'trades' | 'activities' | 'settings';
 
 interface BotDetailViewProps {
   bot: {
     id: string;
+    pairId: string;
     name: string;
+    botName?: string;
     status: 'running' | 'stopped';
     pair: string;
     profit24h: number;
@@ -31,6 +35,7 @@ interface BotDetailViewProps {
   };
   apiBase: string;
   authHeaders: Record<string, string>;
+  accountOptions: Array<{ name: string; type: string }>;
   mode: 'live' | 'test';
   onBack?: () => void;
   initialTab?: DetailTab;
@@ -46,6 +51,7 @@ export function BotDetailView({
   bot,
   apiBase,
   authHeaders,
+  accountOptions,
   mode,
   onBack,
   initialTab = 'dashboard',
@@ -62,8 +68,38 @@ export function BotDetailView({
   const [settingsOriginal, setSettingsOriginal] = useState<any | null>(null);
   const [settingsError, setSettingsError] = useState('');
   const [settingsLoading, setSettingsLoading] = useState(false);
-  const [symbolL, symbolE] = bot.id.split(':');
+  const [symbolL, symbolE] = bot.pairId.split(':');
   const pairLabel = useMemo(() => (symbolL && symbolE ? `${symbolL}/${symbolE}` : bot.name), [symbolE, symbolL, bot.name]);
+  const venuePrefix = (v?: string) => {
+    const val = (v || '').toUpperCase();
+    if (val.startsWith('LIGHTER')) return 'L';
+    if (val.startsWith('EXTENDED')) return 'E';
+    if (val.startsWith('HYPER')) return 'H';
+    return val ? val[0] : '';
+  };
+  const titleLabel = useMemo(() => {
+    return `${bot.name}`;
+  }, [bot.name, settingsDraft, symbolL]);
+  const subtitleLabel = useMemo(() => {
+    return `ID: ${bot.id}`;
+  }, [pairLabel, settingsDraft, symbolE]);
+  const selectedBotId = settingsDraft?.id || bot.id;
+  const [activitiesAtTop, setActivitiesAtTop] = useState(true);
+  const {
+    activities,
+    loading: activitiesLoading,
+    error: activitiesError,
+    hasMore: activitiesHasMore,
+    isLoadingMore: activitiesLoadingMore,
+    loadMore: loadMoreActivities,
+    refresh: refreshActivities,
+    refreshSilent: refreshActivitiesSilent,
+  } = usePaginatedActivities({
+    apiBase,
+    authHeaders,
+    mode,
+    botId: selectedBotId,
+  });
 
   const loadPairConfig = useCallback(async () => {
     setSettingsLoading(true);
@@ -83,7 +119,7 @@ export function BotDetailView({
       const symbols = Array.isArray(data.symbols) ? data.symbols : [];
       setConfigSymbols(symbols);
       const match = symbols.find(
-        (s) => s.SYMBOL_LIGHTER === symbolL && s.SYMBOL_EXTENDED === symbolE
+        (s) => s.SYM_VENUE1 === symbolL && s.SYM_VENUE2 === symbolE
       );
       if (!match) {
         setSettingsError('Pair not found in config.json');
@@ -112,11 +148,20 @@ export function BotDetailView({
     setActiveTab(initialTab);
   }, [initialTab]);
 
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      if (activitiesAtTop) {
+        refreshActivitiesSilent();
+      }
+    }, 4000);
+    return () => clearInterval(intervalId);
+  }, [activitiesAtTop, refreshActivitiesSilent]);
+
   const handleNumberChange = (key: string, value: number | "") => {
     setSettingsDraft((prev: any) => (prev ? { ...prev, [key]: value } : prev));
   };
 
-  const handleSymbolChange = (key: "SYMBOL_LIGHTER" | "SYMBOL_EXTENDED", value: string) => {
+  const handleSymbolChange = (key: "SYM_VENUE1" | "SYM_VENUE2" | "ACC_V1" | "ACC_V2" | "name", value: string) => {
     setSettingsDraft((prev: any) => (prev ? { ...prev, [key]: value } : prev));
   };
 
@@ -139,6 +184,15 @@ export function BotDetailView({
     setSettingsError('');
 
     const normalizedDraft: any = { ...settingsDraft };
+    const randId = () => {
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      let out = "";
+      for (let i = 0; i < 6; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+      return out;
+    };
+    if (!normalizedDraft.id) {
+      normalizedDraft.id = randId();
+    }
     NUMBER_FIELDS.forEach((field) => {
       if (field in normalizedDraft) {
         const val = normalizedDraft[field];
@@ -152,28 +206,36 @@ export function BotDetailView({
     });
 
     const updatedSymbols = configSymbols.map((sym) =>
-      sym.SYMBOL_LIGHTER === symbolL && sym.SYMBOL_EXTENDED === symbolE
+      sym.SYM_VENUE1 === symbolL && sym.SYM_VENUE2 === symbolE
         ? { ...sym, ...normalizedDraft }
         : sym
     );
+    const cleanedSymbols = updatedSymbols.map((sym: any) => {
+      const { L, E, ...rest } = sym || {};
+      if (!rest.id) {
+        rest.id = randId();
+      }
+      return rest;
+    });
 
     try {
       const res = await fetch(`${apiBase}/api/config`, {
         method: 'PUT',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: updatedSymbols }),
+        body: JSON.stringify({ symbols: cleanedSymbols }),
       });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || 'Failed to save config');
       }
-      setConfigSymbols(updatedSymbols);
-      setSettingsOriginal(normalizedDraft);
-      setSettingsDraft(normalizedDraft);
-      localStorage.setItem("selectedPair", JSON.stringify({ L: normalizedDraft.SYMBOL_LIGHTER, E: normalizedDraft.SYMBOL_EXTENDED }));
+      setConfigSymbols(cleanedSymbols);
+      const refreshedDraft = cleanedSymbols.find((s) => s.SYM_VENUE1 === symbolL && s.SYM_VENUE2 === symbolE) || normalizedDraft;
+      setSettingsOriginal(refreshedDraft);
+      setSettingsDraft(refreshedDraft);
+      localStorage.setItem("selectedPair", JSON.stringify({ L: normalizedDraft.SYM_VENUE1, E: normalizedDraft.SYM_VENUE2 }));
       localStorage.setItem("selectedTab", "settings");
       if (onSettingsSaved) {
-        onSettingsSaved(normalizedDraft);
+        onSettingsSaved(refreshedDraft);
       }
       return true;
     } catch (err) {
@@ -186,6 +248,7 @@ export function BotDetailView({
     { id: 'dashboard' as DetailTab, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'decisions' as DetailTab, label: 'Decisions', icon: ListChecks },
     { id: 'trades' as DetailTab, label: 'Trades', icon: TrendingUp },
+    { id: 'activities' as DetailTab, label: 'Activities', icon: Activity },
     { id: 'settings' as DetailTab, label: 'Bot Settings', icon: Settings },
   ];
 
@@ -202,6 +265,25 @@ export function BotDetailView({
 
   return (
     <div className="flex flex-col min-h-[calc(100vh-200px)] min-h-0">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-white text-xl font-semibold">{titleLabel}</h2>
+          <p className="text-slate-400 text-sm font-mono">{subtitleLabel}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`inline-flex items-center justify-center px-3 py-1 rounded-full border text-xs font-semibold ${statusStyles}`}>
+            {bot.status === 'running' ? 'Running' : 'Stopped'}
+          </span>
+          {onBack && (
+            <button
+              onClick={() => onBack()}
+              className="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-200 hover:text-white hover:bg-slate-800/50 text-xs transition-all"
+            >
+              Back
+            </button>
+          )}
+        </div>
+      </div>
       {/* Tabs */}
       <div className="bg-slate-900/30 backdrop-blur-sm border border-slate-800/50 rounded-t-xl overflow-hidden">
         <nav className="flex flex-wrap gap-1 px-2 pt-2 w-full justify-between sm:justify-start">
@@ -282,10 +364,34 @@ export function BotDetailView({
           </div>
         )}
         {activeTab === 'decisions' && (
-          <DecisionsTable botId={bot.id} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
+          <DecisionsTable botId={bot.pairId} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
         {activeTab === 'trades' && (
-          <TradesTable botId={bot.id} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
+          <TradesTable botId={bot.pairId} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
+        )}
+        {activeTab === 'activities' && (
+          <div className="space-y-4">
+            {activitiesError && (
+              <div className="px-4 py-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-sm">
+                {activitiesError}
+              </div>
+            )}
+            {activitiesLoading && (
+              <div className="px-4 py-6 text-slate-400 text-sm">Loading activity history…</div>
+            )}
+            {!activitiesLoading && activities.length === 0 && (
+              <div className="px-4 py-6 text-slate-400 text-sm">No trace records yet. Activity will appear after the bot logs decisions/trades/fills.</div>
+            )}
+            {!activitiesLoading && activities.length > 0 && (
+              <ActivitiesTable
+                activities={activities}
+                hasMore={activitiesHasMore}
+                isLoadingMore={activitiesLoadingMore}
+                onLoadMore={loadMoreActivities}
+                onScrollPositionChange={(isTop) => setActivitiesAtTop(isTop)}
+              />
+            )}
+          </div>
         )}
         {activeTab === 'settings' && (
           <div className="space-y-3">
@@ -303,6 +409,7 @@ export function BotDetailView({
                 draft={settingsDraft}
                 numberFields={NUMBER_FIELDS}
                 boolFields={BOOL_FIELDS}
+                accountOptions={accountOptions}
                 onNumberChange={handleNumberChange}
                 onSymbolChange={handleSymbolChange}
                 onToggle={handleToggle}
