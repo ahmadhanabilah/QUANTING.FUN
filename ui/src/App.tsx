@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ChevronDown, LogOut, Plus, Search, Settings as SettingsIcon, TrendingUp } from "lucide-react";
+import { ChevronDown, LogOut, Plus, Search, Settings as SettingsIcon, Activity, LayoutDashboard, Bot } from "lucide-react";
 import "./index.css";
 import { BotCard } from "./components/bot-card";
 import { BotDetailView } from "./components/bot-detail-view";
@@ -8,6 +8,8 @@ import type { DetailTab } from "./components/bot-detail-view";
 import { LoginPage } from "./components/login-page";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
 import { ActivitiesOverview } from "./components/activities-overview";
+import { AccountsOverview } from "./components/accounts-overview";
+import { useAccountsStream, AccountSnapshot } from "./hooks/use-accounts-stream";
 import {
     Dialog,
     DialogContent,
@@ -31,7 +33,7 @@ type SymbolCfg = Record<string, any> & {
     ACC_V2?: string;
 };
 
-type Tab = "dashboard" | "activities" | "settings";
+type Tab = "dashboard" | "bots" | "activities" | "settings";
 
 type EnvLine =
     | { type: "pair"; key: string; value: string }
@@ -49,6 +51,20 @@ type BotCardModel = {
     cfg: SymbolCfg;
     L: string;
     E: string;
+    positionV1?: {
+        account?: string;
+        symbol?: string;
+        qty?: number;
+        entry?: number;
+        notional?: number | null;
+    };
+    positionV2?: {
+        account?: string;
+        symbol?: string;
+        qty?: number;
+        entry?: number;
+        notional?: number | null;
+    };
 };
 
 type AccountOption = {
@@ -94,6 +110,8 @@ type CreateBotDraft = {
     ORDER_HEARTBEAT_ENABLED: boolean;
     ORDER_HEARTBEAT_INTERVAL: number;
     SLIPPAGE: number;
+    INV_LEVEL_TO_MULT: number;
+    SPREAD_MULTIPLIER: number;
 };
 
 type BulkInputItem = {
@@ -166,9 +184,11 @@ const BASE_BOT_DRAFT: CreateBotDraft = {
     TEST_MODE: false,
     DEDUP_OB: true,
     WARM_UP_ORDERS: false,
-    ORDER_HEARTBEAT_ENABLED: false,
-    ORDER_HEARTBEAT_INTERVAL: 60,
+    ORDER_HEARTBEAT_ENABLED: true,
+    ORDER_HEARTBEAT_INTERVAL: 5,
     SLIPPAGE: 0.04,
+    INV_LEVEL_TO_MULT: 5,
+    SPREAD_MULTIPLIER: 1.2,
 };
 
 const BULK_NUMERIC_COLS: Array<keyof CreateBotDraft> = [
@@ -182,6 +202,8 @@ const BULK_NUMERIC_COLS: Array<keyof CreateBotDraft> = [
     "MIN_HITS",
     "SLIPPAGE",
     "ORDER_HEARTBEAT_INTERVAL",
+    "INV_LEVEL_TO_MULT",
+    "SPREAD_MULTIPLIER",
 ];
 
 const BULK_BOOL_COLS: Array<keyof CreateBotDraft> = [
@@ -262,7 +284,7 @@ function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>,
         return num;
     };
     return {
-        name: nameVal || `${symL}-${symE}`,
+        name: nameVal || String(symL),
         id: idVal || randomId(),
         VENUE1: String(venue1).trim(),
         SYM_VENUE1: String(symL).trim(),
@@ -289,6 +311,14 @@ function normalizeBotEntry(entry: Partial<CreateBotDraft> | Record<string, any>,
             merged.ORDER_HEARTBEAT_INTERVAL
         ),
         SLIPPAGE: toNumber(entry?.SLIPPAGE ?? merged.SLIPPAGE, merged.SLIPPAGE),
+        INV_LEVEL_TO_MULT: toNumber(
+            entry?.INV_LEVEL_TO_MULT ?? merged.INV_LEVEL_TO_MULT,
+            merged.INV_LEVEL_TO_MULT
+        ),
+        SPREAD_MULTIPLIER: toNumber(
+            entry?.SPREAD_MULTIPLIER ?? merged.SPREAD_MULTIPLIER,
+            merged.SPREAD_MULTIPLIER
+        ),
     };
 }
 
@@ -478,7 +508,7 @@ export default function App() {
     const [activeTab, setActiveTab] = useState<Tab>(() => {
         try {
             const stored = localStorage.getItem("activeTab") as Tab | null;
-            if (stored === "dashboard" || stored === "settings" || stored === "trades") {
+            if (stored === "dashboard" || stored === "bots" || stored === "activities" || stored === "settings") {
                 return stored;
             }
         } catch {
@@ -540,6 +570,11 @@ export default function App() {
     };
 
     const authHeaders = useMemo(() => buildAuth(user, pass), [user, pass]);
+    const {
+        accounts: accountSnapshots,
+        error: accountStreamError,
+        connected: accountStreamConnected,
+    } = useAccountsStream({ apiBase: API_BASE, authHeaders, enabled: authed });
     const serverStatusSummary = useMemo(() => {
         if (!serverStatus) return null;
         const cpuCapacity = serverStatus.cpu?.count ? `${serverStatus.cpu.count} cores` : "—";
@@ -565,6 +600,29 @@ export default function App() {
         });
         return map;
     }, [accounts]);
+
+    const accountSnapshotByName = useMemo(() => {
+        const map: Record<string, AccountSnapshot> = {};
+        accountSnapshots.forEach((acc) => {
+            if (acc?.name) {
+                map[acc.name] = acc;
+            }
+        });
+        return map;
+    }, [accountSnapshots]);
+
+    const findAccountPosition = useCallback(
+        (accountName?: string, symbol?: string) => {
+            if (!accountName || !symbol) return undefined;
+            const snapshot = accountSnapshotByName[accountName];
+            if (!snapshot?.positions?.length) {
+                return undefined;
+            }
+            const target = symbol.toUpperCase();
+            return snapshot.positions.find((pos) => (pos.symbol || "").toUpperCase() === target);
+        },
+        [accountSnapshotByName]
+    );
 
     const getAccountType = useCallback(
         (name?: string) => {
@@ -596,6 +654,8 @@ export default function App() {
     const bots: BotCardModel[] = symbols.map((s) => {
         const actualL = stripVenueSymbol(s.SYM_VENUE1);
         const actualE = stripVenueSymbol(s.SYM_VENUE2);
+        const posV1 = findAccountPosition(s.ACC_V1, actualL);
+        const posV2 = findAccountPosition(s.ACC_V2, actualE);
         let sessionSymL = actualL;
         let sessionSymE = actualE;
         const venueType1 = getAccountType(s.ACC_V1) || s.VENUE1 || "";
@@ -642,10 +702,31 @@ export default function App() {
             cfg: s,
             L: actualL,
             E: actualE,
+            positionV1: {
+                account: s.ACC_V1,
+                symbol: actualL,
+                qty: posV1?.qty,
+                entry: posV1?.entry,
+                notional: posV1?.notional,
+            },
+            positionV2: {
+                account: s.ACC_V2,
+                symbol: actualE,
+                qty: posV2?.qty,
+                entry: posV2?.entry,
+                notional: posV2?.notional,
+            },
         };
     });
 
     const activeBots = bots.filter((b) => b.status === "running").length;
+    const botMetaByPair = useMemo(() => {
+        const map: Record<string, { name?: string; id?: string; status?: string }> = {};
+        bots.forEach((bot) => {
+            map[bot.pairId] = { name: bot.name, id: bot.id, status: bot.status };
+        });
+        return map;
+    }, [bots]);
 
     async function authCheck() {
         setLoading(true);
@@ -937,7 +1018,7 @@ export default function App() {
                 const parsed = JSON.parse(storedPair);
                 if (parsed?.L && parsed?.E) {
                     setSelectedPair({ L: parsed.L, E: parsed.E });
-                    const allowedDetailTabs: DetailTab[] = ["dashboard", "decisions", "trades", "settings"];
+                    const allowedDetailTabs: DetailTab[] = ["dashboard", "activities", "settings"];
                     if (storedTab && allowedDetailTabs.includes(storedTab)) {
                         setInitialDetailTab(storedTab);
                     }
@@ -1473,8 +1554,18 @@ export default function App() {
                                                 : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
                                             }`}
                                     >
-                                        <Activity className="w-4 h-4" />
+                                        <LayoutDashboard className="w-4 h-4" />
                                         <span className="hidden xl:inline">Dashboard</span>
+                                    </button>
+                                    <button
+                                        onClick={() => handleNav("bots")}
+                                        className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "bots"
+                                                ? "border-blue-500 text-white bg-blue-600/40"
+                                                : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                                            }`}
+                                    >
+                                        <Bot className="w-4 h-4" />
+                                        <span className="hidden xl:inline">Bots</span>
                                     </button>
                                     <button
                                         onClick={() => handleNav("activities")}
@@ -1483,19 +1574,19 @@ export default function App() {
                                                 : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
                                             }`}
                                     >
-                                        <TrendingUp className="w-4 h-4" />
+                                        <Activity className="w-4 h-4" />
                                         <span className="hidden xl:inline">Activities</span>
                                     </button>
-                                        <button
-                                            onClick={() => handleNav("settings")}
-                                            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "settings"
-                                                    ? "border-blue-500 text-white bg-blue-600/40"
-                                                    : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
-                                                }`}
-                                        >
-                                            <SettingsIcon className="w-4 h-4" />
-                                            <span className="hidden xl:inline">Accounts</span>
-                                        </button>
+                                    <button
+                                        onClick={() => handleNav("settings")}
+                                        className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border transition-all ${activeTab === "settings"
+                                                ? "border-blue-500 text-white bg-blue-600/40"
+                                                : "border-slate-700 text-slate-300 bg-slate-900/40 hover:text-white hover:bg-slate-800/50"
+                                            }`}
+                                    >
+                                        <SettingsIcon className="w-4 h-4" />
+                                        <span className="hidden xl:inline">Accounts</span>
+                                    </button>
                                     <button
                                         onClick={logout}
                                         className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 text-sm uppercase tracking-wide rounded-lg border border-slate-700 text-slate-200 bg-slate-900/50 hover:bg-slate-800/50 transition-all"
@@ -1512,6 +1603,23 @@ export default function App() {
                 <main className="p-6">
                     <div className="max-w-7xl mx-auto space-y-6">
                         {!selected && activeTab === "dashboard" && (
+                            <AccountsOverview
+                                accounts={accountSnapshots}
+                                configSymbols={configSymbols}
+                                botMetaByPair={botMetaByPair}
+                                error={accountStreamError}
+                                loading={!accountStreamConnected}
+                                apiBase={API_BASE}
+                                authHeaders={authHeaders}
+                                onSelectBot={(symbolL, symbolE) => {
+                                    setSelectedPair({ L: symbolL, E: symbolE });
+                                    localStorage.setItem("selectedPair", JSON.stringify({ L: symbolL, E: symbolE }));
+                                    localStorage.setItem("selectedTab", "dashboard");
+                                }}
+                            />
+                        )}
+
+                        {!selected && activeTab === "bots" && (
                             <div>
                                 <div className="mb-6 space-y-3">
                                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1711,29 +1819,36 @@ export default function App() {
                                         </DialogContent>
                                     </Dialog>
                                     <Dialog open={bulkEditOpen} onOpenChange={handleBulkEditDialogChange}>
-                                        <DialogContent className="max-w-6xl w-[90vw] max-h-[75vh]">
+                                        <DialogContent className="max-w-[80vw] sm:max-w-[80vw] w-[80vw] sm:w-[80vw] max-h-[75vh]">
                                             <DialogHeader>
                                                 <DialogTitle>Bulk edit bots</DialogTitle>
                                                 <DialogDescription>Edit existing bot settings in a table, then save to update config.json.</DialogDescription>
                                             </DialogHeader>
                                         <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 relative max-h-[55vh] overflow-y-auto">
                                             <table className="w-full text-xs table-mono">
-                                                <thead className="bg-slate-900">
+                                                <thead className="bg-slate-900 sticky top-0 z-30">
                                                     <tr>
                                                         {(["name", "ACC_V1", "SYM_VENUE1", "ACC_V2", "SYM_VENUE2", ...BULK_NUMERIC_COLS, ...BULK_BOOL_COLS, "actions"] as const).map((col, colIdx) => {
-                                                            const sticky = colIdx === 0 ? "sticky left-0 bg-slate-900/95 z-10 min-w-[160px]" : "";
+                                                            const sticky = colIdx === 0 ? "sticky left-0 top-0 bg-slate-900/95 z-30 min-w-[160px]" : "top-0";
                                                             const extraClass =
-                                                                ["ACC_V1", "ACC_V2", "SYM_VENUE1", "SYM_VENUE2"].includes(col) ? "min-w-[170px]" : "min-w-[120px]";
+                                                                ["ACC_V1", "ACC_V2", "SYM_VENUE1", "SYM_VENUE2"].includes(col)
+                                                                    ? "min-w-[170px]"
+                                                                    : BULK_BOOL_COLS.includes(col as keyof CreateBotDraft)
+                                                                    ? "min-w-[140px]"
+                                                                    : col === "actions"
+                                                                    ? "min-w-[150px] text-center"
+                                                                    : "min-w-[120px]";
                                                             const label =
                                                                 col === "name"
                                                                     ? "NAME"
                                                                     : col === "actions"
                                                                     ? "ACTIONS"
                                                                     : col.replace("_", " ");
+                                                            const alignment = BULK_BOOL_COLS.includes(col as keyof CreateBotDraft) || col === "actions" ? "text-center" : "text-left";
                                                             return (
                                                                 <th
                                                                     key={col}
-                                                                    className={`px-2 py-2 text-left text-slate-300 whitespace-nowrap ${sticky} ${extraClass}`}
+                                                                    className={`px-2 py-2 ${alignment} text-slate-300 whitespace-nowrap ${sticky} ${extraClass}`}
                                                                 >
                                                                     {label}
                                                                 </th>
@@ -1802,24 +1917,26 @@ export default function App() {
                                                                         />
                                                                     </td>
                                                                 ))}
-                                                               {BULK_BOOL_COLS.map((key) => (
-                                                                   <td key={key} className="px-2 py-1 text-center">
-                                                                       <input
-                                                                           type="checkbox"
-                                                                           checked={Boolean((row as any)[key])}
-                                                                           onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.checked)}
-                                                                       />
-                                                                   </td>
-                                                               ))}
-                                                                <td className="px-2 py-1 text-right">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => removeBulkEditRow(idx)}
-                                                                        className="px-3 py-1 rounded-lg bg-red-600 text-white text-[11px] hover:bg-red-500 transition"
-                                                                    >
-                                                                        Delete
-                                                                    </button>
-                                                                </td>
+                               {BULK_BOOL_COLS.map((key) => (
+                                   <td key={key} className="px-2 py-1 text-center min-w-[150px]">
+                                       <div className="flex justify-center">
+                                           <input
+                                               type="checkbox"
+                                               checked={Boolean((row as any)[key])}
+                                               onChange={(e) => updateBulkEditRow(idx, key as keyof SymbolCfg, e.target.checked)}
+                                           />
+                                       </div>
+                                   </td>
+                               ))}
+                                <td className="px-2 py-1 text-center min-w-[160px]">
+                                    <button
+                                        type="button"
+                                        onClick={() => removeBulkEditRow(idx)}
+                                        className="px-3 py-1 rounded-lg bg-red-600 text-white text-[11px] hover:bg-red-500 transition w-full max-w-[100px]"
+                                    >
+                                        Delete
+                                    </button>
+                                </td>
                                                            </tr>
                                                        ))}
                                                    </tbody>

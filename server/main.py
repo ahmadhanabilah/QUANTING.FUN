@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
+# Run: /home/ubuntu/QUANTING.FUN/.venv/bin/python /home/ubuntu/QUANTING.FUN/server/main.py
 import base64
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
+import lighter
 import psutil
 from datetime import datetime, timezone, timedelta
 from fastapi import Depends, FastAPI, HTTPException, Response, status, WebSocket, WebSocketDisconnect
@@ -16,8 +20,17 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from bot.common.db_client import DBClient
+from x10.perpetual.accounts import StarkPerpetualAccount
+from x10.perpetual.configuration import MAINNET_CONFIG
+from x10.perpetual.trading_client import PerpetualTradingClient
+
+class _AccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage() if record else ""
+        return "/api/tt/activities" not in message
 
 app = FastAPI(title="arb_bot control")
+logging.getLogger("uvicorn.access").addFilter(_AccessLogFilter())
 security = HTTPBasic()
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +82,10 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TG_TOPIC_ID = os.getenv("TELEGRAM_TOPIC_ID")
 WATCHDOG_ENABLED = str(os.getenv("DB_WATCHDOG_ENABLED", "false")).lower() == "true"
 WATCHDOG_PERIOD = float(os.getenv("DB_WATCHDOG_PERIOD", "60"))
+ACCOUNT_STREAM_ENABLED = str(os.getenv("ACCOUNT_STREAM_ENABLED", "true")).lower() == "true"
+ACCOUNT_STREAM_PERIOD = float(os.getenv("ACCOUNT_STREAM_PERIOD", "5"))
+ACCOUNT_PNL_TTL = float(os.getenv("ACCOUNT_PNL_TTL", "10"))
+PNL_RANGE_OVERRIDE: dict[str, Optional[int]] = {"start_ts": None, "end_ts": None}
 
 CORS_ORIGINS = [
     origin.strip()
@@ -348,6 +365,486 @@ def _delete_account(name: str, acc_type: str | None = None) -> None:
             pass
 
 
+def _read_env_file(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key:
+            values[key] = val
+    return values
+
+
+def _list_account_env_files() -> List[dict]:
+    _ensure_env_dir()
+    entries: List[dict] = []
+    for path in ENV_DIR.glob(".env_*_*"):
+        parts = path.name.split("_", 2)
+        if len(parts) < 3:
+            continue
+        raw_type = parts[1].upper()
+        suffix = parts[2]
+        acc_type = raw_type if raw_type in ACCOUNT_FIELD_MAP else ACCOUNT_TYPE_ALIASES.get(raw_type)
+        if not acc_type:
+            continue
+        name = suffix
+        if raw_type not in ACCOUNT_FIELD_MAP:
+            name = f"{raw_type}_{suffix}" if suffix else raw_type
+        entries.append({"name": name, "type": acc_type, "path": path})
+    return entries
+
+
+def _parse_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _get_cached_pnl(cache_key: str, allow_stale: bool = False) -> Optional[dict]:
+    entry = ACCOUNT_PNL_CACHE.get(cache_key)
+    if not entry:
+        return None
+    if allow_stale or (time.time() - entry.get("ts", 0)) < ACCOUNT_PNL_TTL:
+        return entry.get("pnl")
+    return None
+
+
+def _set_cached_pnl(cache_key: str, pnl: dict) -> None:
+    ACCOUNT_PNL_CACHE[cache_key] = {"ts": time.time(), "pnl": pnl}
+
+
+def _get_lighter_auth_token(env_vals: Dict[str, str], base_url: str) -> Optional[str]:
+    account_index = env_vals.get("LIGHTER_ACCOUNT_INDEX")
+    api_key_index = env_vals.get("LIGHTER_API_KEY_INDEX")
+    private_key = env_vals.get("LIGHTER_API_PRIVATE_KEY")
+    if not account_index or not api_key_index or not private_key:
+        return None
+    cache_key = f"{account_index}:{api_key_index}:{private_key}"
+    cached = LIGHTER_AUTH_CACHE.get(cache_key)
+    now = time.time()
+    if cached and now < cached.get("expiry", 0) - 30:
+        return cached.get("token")
+    try:
+        api_idx = int(api_key_index)
+        api_keys = {api_idx: private_key}
+        client = lighter.SignerClient(
+            url=base_url,
+            account_index=int(account_index),
+            api_private_keys=api_keys,
+        )
+        auth, err = client.create_auth_token_with_expiry(lighter.SignerClient.DEFAULT_10_MIN_AUTH_EXPIRY)
+        if err:
+            print(f"[accounts] lighter auth error: {err}")
+            return None
+        token = getattr(auth, "auth_token", None) or str(auth)
+        LIGHTER_AUTH_CACHE[cache_key] = {"token": token, "expiry": now + 9 * 60}
+        return token
+    except Exception as exc:
+        print(f"[accounts] lighter auth error: {exc}")
+        return None
+
+
+def _sum_lighter_pnl(rows: list[Any]) -> float:
+    items: List[tuple[int, float]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ts = _parse_float(row.get("timestamp"))
+        val = _parse_float(row.get("trade_pnl"))
+        if ts is None or val is None:
+            continue
+        items.append((int(ts), val))
+    if not items:
+        return 0.0
+    items.sort(key=lambda item: item[0])
+    if len(items) == 1:
+        return items[-1][1]
+    return items[-1][1] - items[0][1]
+
+
+def _normalize_pnl_window(start_ts: int, end_ts: int) -> tuple[int, int]:
+    if start_ts <= 0:
+        start_ts = end_ts - int(86400 * 365 * 5)
+        if start_ts < 0:
+            start_ts = 0
+    if end_ts <= start_ts:
+        end_ts = start_ts + 86400
+    return start_ts, end_ts
+
+
+def _get_pnl_range_override() -> tuple[Optional[int], Optional[int]]:
+    start_ts = PNL_RANGE_OVERRIDE.get("start_ts")
+    end_ts = PNL_RANGE_OVERRIDE.get("end_ts")
+    return start_ts if isinstance(start_ts, int) else None, end_ts if isinstance(end_ts, int) else None
+
+
+async def _fetch_extended_net_inflow(session: aiohttp.ClientSession, name: str, api_key: str) -> dict:
+    cache_key = f"EXTENDED_NET:{name}"
+    cached = _get_cached_pnl(cache_key)
+    if cached is not None:
+        return cached
+    if not api_key:
+        return {"net_inflow": None, "error": "Missing EXTENDED_API_KEY"}
+    url = f"{MAINNET_CONFIG.api_base_url}/user/assetOperations"
+    headers = {"accept": "application/json", "X-Api-Key": api_key}
+    limit = 200
+    cursor = None
+    deposit_total = 0.0
+    inbound_total = 0.0
+    outbound_total = 0.0
+
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    while True:
+        params = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                return {"net_inflow": None, "error": f"HTTP {resp.status} {body}"}
+            payload = await resp.json(content_type=None)
+        if not isinstance(payload, dict) or payload.get("status") not in (None, "OK"):
+            return {"net_inflow": None, "error": "Invalid assetOperations response"}
+        rows = payload.get("data") or []
+        if not isinstance(rows, list):
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            typ = str(row.get("type", "")).upper()
+            amount = _to_float(row.get("amount"))
+            fee = _to_float(row.get("fee"))
+            direction = str(row.get("direction") or row.get("side") or row.get("transfer_type") or "").upper()
+
+            if typ == "DEPOSIT":
+                deposit_total += amount
+                continue
+            if typ in ("WITHDRAWAL", "FAST_WITHDRAWAL", "SLOW_WITHDRAWAL"):
+                outbound_total += abs(amount) + (fee or 0)
+                continue
+            if typ == "TRANSFER":
+                if direction in ("IN", "INCOMING", "RECEIVE", "DEPOSIT"):
+                    inbound_total += amount
+                    continue
+                if direction in ("OUT", "OUTGOING", "SEND", "WITHDRAW"):
+                    outbound_total += amount + (fee or 0)
+                    continue
+                if amount < 0:
+                    outbound_total += abs(amount)
+                elif amount > 0:
+                    inbound_total += amount
+
+        next_cursor = None
+        if isinstance(payload.get("pagination"), dict):
+            next_cursor = payload["pagination"].get("cursor")
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+
+    net_inflow = deposit_total + inbound_total - outbound_total
+    print(f"[net_inflow] deposits={deposit_total:.6f} inbound={inbound_total:.6f} outbound={outbound_total:.6f} net_inflow={net_inflow:.6f}")
+    result = {
+        "net_inflow": net_inflow,
+        "deposit": deposit_total,
+        "inbound_transfer": inbound_total,
+        "outbound_transfer": outbound_total,
+    }
+    _set_cached_pnl(cache_key, result)
+    return result
+
+
+async def _fetch_lighter_pnl(
+    session: aiohttp.ClientSession,
+    env_vals: Dict[str, str],
+    account_index: str,
+    mode: str,
+    base_url: str,
+) -> dict:
+    cache_key = f"LIGHTER:{account_index}"
+    cached = _get_cached_pnl(cache_key)
+    if cached is not None:
+        return cached
+    resolution = env_vals.get("LIGHTER_PNL_RESOLUTION", "1d")
+    start_ts_raw = env_vals.get("LIGHTER_PNL_START_TS")
+    start_ts = int(_parse_float(start_ts_raw) or 0)
+    end_ts = int(time.time())
+    override_start, override_end = _get_pnl_range_override()
+    if override_start is not None:
+        start_ts = override_start
+    if override_end is not None:
+        end_ts = override_end
+    start_ts, end_ts = _normalize_pnl_window(start_ts, end_ts)
+    url = f"{base_url.rstrip('/')}/api/v1/pnl"
+    params = {
+        "by": mode,
+        "value": account_index,
+        "resolution": resolution,
+        "start_timestamp": start_ts,
+        "end_timestamp": end_ts,
+        "count_back": 0,
+        "ignore_transfers": "false",
+    }
+    auth_token = _get_lighter_auth_token(env_vals, base_url)
+    if auth_token:
+        params["auth"] = auth_token
+    else:
+        return {"total": None, "error": "Missing LIGHTER auth token"}
+    try:
+        # print('[fetching lighter pnl]')
+        async with session.get(url, params=params, headers={"accept": "application/json"}) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                stale = _get_cached_pnl(cache_key, allow_stale=True)
+                return stale or {"total": None, "error": f"HTTP {resp.status}"}
+            payload = await resp.json(content_type=None)
+    except Exception as exc:
+        stale = _get_cached_pnl(cache_key, allow_stale=True)
+        return stale or {"total": None, "error": str(exc)}
+    if not isinstance(payload, dict) or payload.get("code") not in (200, "200", None):
+        stale = _get_cached_pnl(cache_key, allow_stale=True)
+        return stale or {"total": None, "error": "Invalid response"}
+    rows = payload.get("pnl") if isinstance(payload, dict) else None
+    total = _sum_lighter_pnl(rows or [])
+    pnl = {"total": total}
+    _set_cached_pnl(cache_key, pnl)
+    return pnl
+
+
+EXTENDED_CLIENTS: Dict[str, dict] = {}
+ACCOUNT_PNL_CACHE: Dict[str, dict] = {}
+LIGHTER_AUTH_CACHE: Dict[str, dict] = {}
+ACCOUNT_STREAM_STATE: Dict[str, Any] = {"ts": 0, "accounts": []}
+ACCOUNT_STREAM_CLIENTS: set[WebSocket] = set()
+
+
+def _extended_client_for(account_name: str, env_vals: Dict[str, str]) -> Optional[PerpetualTradingClient]:
+    required = {
+        "EXTENDED_VAULT_ID": env_vals.get("EXTENDED_VAULT_ID"),
+        "EXTENDED_PRIVATE_KEY": env_vals.get("EXTENDED_PRIVATE_KEY"),
+        "EXTENDED_PUBLIC_KEY": env_vals.get("EXTENDED_PUBLIC_KEY"),
+        "EXTENDED_API_KEY": env_vals.get("EXTENDED_API_KEY"),
+    }
+    if not all(required.values()):
+        return None
+    key_tuple = tuple(required.values())
+    cached = EXTENDED_CLIENTS.get(account_name)
+    if cached and cached.get("key_tuple") == key_tuple:
+        return cached.get("client")
+    try:
+        stark_acc = StarkPerpetualAccount(
+            vault=int(required["EXTENDED_VAULT_ID"]),
+            private_key=required["EXTENDED_PRIVATE_KEY"],
+            public_key=required["EXTENDED_PUBLIC_KEY"],
+            api_key=required["EXTENDED_API_KEY"],
+        )
+        client = PerpetualTradingClient(MAINNET_CONFIG, stark_acc)
+    except Exception:
+        return None
+    EXTENDED_CLIENTS[account_name] = {"key_tuple": key_tuple, "client": client}
+    return client
+
+
+async def _fetch_lighter_snapshot(session: aiohttp.ClientSession, entry: dict) -> dict:
+    name = entry["name"]
+    env_vals = entry["env"]
+    account_index = env_vals.get("LIGHTER_ACCOUNT_INDEX") or env_vals.get("LIGHTER_ACCOUNT_ID")
+    base_url = env_vals.get("LIGHTER_BASE_URL") or "https://mainnet.zklighter.elliot.ai"
+    if not account_index:
+        return {"name": name, "type": "LIGHTER", "error": "Missing LIGHTER_ACCOUNT_INDEX"}
+    mode = "id" if env_vals.get("LIGHTER_ACCOUNT_ID") else "index"
+    url = f"{base_url}/api/v1/account?by={mode}&value={account_index}"
+    try:
+        async with session.get(url, headers={"accept": "application/json"}) as resp:
+            if resp.status != 200:
+                return {"name": name, "type": "LIGHTER", "error": f"HTTP {resp.status}"}
+            payload = await resp.json(content_type=None)
+    except Exception as exc:
+        return {"name": name, "type": "LIGHTER", "error": str(exc)}
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    if not accounts:
+        return {"name": name, "type": "LIGHTER", "error": "No account data"}
+    account = accounts[0] if isinstance(accounts, list) else accounts
+    total = _parse_float(account.get("total_asset_value"))
+    if total is None:
+        total = _parse_float(account.get("collateral"))
+    if total is None:
+        total = _parse_float(account.get("available_balance"))
+    available = _parse_float(account.get("available_balance"))
+    positions_raw = account.get("positions") or []
+    positions = []
+    if isinstance(positions_raw, list):
+        for pos in positions_raw:
+            if not isinstance(pos, dict):
+                continue
+            symbol = pos.get("symbol") or pos.get("market") or pos.get("name")
+            qty_val = _parse_float(pos.get("position") or pos.get("size") or 0) or 0.0
+            sign_val = pos.get("sign")
+            side_val = str(pos.get("side", "")).upper()
+            sign = None
+            if sign_val is not None:
+                try:
+                    sign = int(sign_val)
+                except Exception:
+                    sign = None
+            if sign is None:
+                sign = -1 if side_val == "SHORT" else 1
+            qty = qty_val * sign
+            entry = _parse_float(
+                pos.get("avg_entry_price")
+                or pos.get("open_price")
+                or pos.get("openPrice")
+                or 0
+            ) or 0.0
+            notional = abs(qty) * entry if entry else None
+            positions.append(
+                {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "entry": entry,
+                    "notional": notional,
+                    "side": "SHORT" if qty < 0 else "LONG" if qty > 0 else "FLAT",
+                }
+            )
+    pnl = await _fetch_lighter_pnl(session, env_vals, str(account_index), mode, base_url)
+    return {
+        "name": name,
+        "type": "LIGHTER",
+        "balance": {"total": total, "available": available},
+        "positions": positions,
+        "pnl": pnl,
+    }
+
+
+async def _fetch_extended_snapshot(session: aiohttp.ClientSession, entry: dict) -> dict:
+    name = entry["name"]
+    env_vals = entry["env"]
+    client = _extended_client_for(name, env_vals)
+    if client is None:
+        return {"name": name, "type": "EXTENDED", "error": "Missing EXTENDED_* credentials"}
+    balance = None
+    positions = []
+    try:
+        balance_resp = await client.account.get_balance()
+        balance = balance_resp.data if balance_resp else None
+    except Exception as exc:
+        return {"name": name, "type": "EXTENDED", "error": f"balance error: {exc}"}
+    try:
+        pos_resp = await client.account.get_positions()
+        raw_positions = pos_resp.data if pos_resp else []
+        for pos in raw_positions or []:
+            try:
+                symbol = getattr(pos, "market", None) or getattr(pos, "symbol", None)
+                side_val = str(getattr(pos, "side", "") or "").upper()
+                qty_val = float(getattr(pos, "size", 0) or 0)
+                sign = -1 if side_val == "SHORT" else 1
+                qty = qty_val * sign
+                entry = _parse_float(getattr(pos, "open_price", None)) or 0.0
+                notional = abs(qty) * entry if entry else None
+                status = str(getattr(pos, "status", "") or "").upper()
+                positions.append(
+                    {
+                        "symbol": symbol,
+                        "qty": qty,
+                        "entry": entry,
+                        "notional": notional,
+                        "status": status or None,
+                        "side": "SHORT" if qty < 0 else "LONG" if qty > 0 else "FLAT",
+                    }
+                )
+            except Exception:
+                continue
+    except Exception as exc:
+        return {"name": name, "type": "EXTENDED", "error": f"positions error: {exc}"}
+    total = _parse_float(getattr(balance, "equity", None)) if balance else None
+    if total is None and balance is not None:
+        total = _parse_float(getattr(balance, "balance", None))
+    available = _parse_float(getattr(balance, "available_for_trade", None)) if balance else None
+    pnl = None
+    if total is not None:
+        net_info = await _fetch_extended_net_inflow(session, name, env_vals.get("EXTENDED_API_KEY", ""))
+        net_inflow = net_info.get("net_inflow") if isinstance(net_info, dict) else None
+        if net_inflow is not None:
+            pnl = {
+                "total": total - net_inflow,
+                **{k: v for k, v in net_info.items() if k != "net_inflow"},
+                "net_inflow": net_inflow,
+            }
+        else:
+            pnl = net_info
+    return {
+        "name": name,
+        "type": "EXTENDED",
+        "balance": {"total": total, "available": available},
+        "positions": positions,
+        "pnl": pnl,
+    }
+
+
+async def _collect_account_snapshots() -> List[dict]:
+    entries = _list_account_env_files()
+    if not entries:
+        return []
+    for entry in entries:
+        entry["env"] = _read_env_file(entry["path"])
+    results: List[dict] = []
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for entry in entries:
+            if entry["type"] == "LIGHTER":
+                tasks.append(_fetch_lighter_snapshot(session, entry))
+            elif entry["type"] == "EXTENDED":
+                tasks.append(_fetch_extended_snapshot(session, entry))
+        if not tasks:
+            return []
+        snapshots = await asyncio.gather(*tasks, return_exceptions=True)
+    for item in snapshots:
+        if isinstance(item, Exception):
+            results.append({"error": str(item)})
+        else:
+            results.append(item)
+    return results
+
+
+async def _broadcast_accounts(payload: dict) -> None:
+    if not ACCOUNT_STREAM_CLIENTS:
+        return
+    message = json.dumps(payload)
+    stale = []
+    for ws in list(ACCOUNT_STREAM_CLIENTS):
+        try:
+            await ws.send_text(message)
+        except Exception:
+            stale.append(ws)
+    for ws in stale:
+        ACCOUNT_STREAM_CLIENTS.discard(ws)
+
+
+async def _account_stream_loop() -> None:
+    while True:
+        try:
+            accounts = await _collect_account_snapshots()
+            snapshot = {"ts": time.time(), "accounts": accounts}
+            ACCOUNT_STREAM_STATE.update(snapshot)
+            await _broadcast_accounts(snapshot)
+        except Exception as exc:
+            print(f"[accounts] loop error: {exc}")
+        await asyncio.sleep(ACCOUNT_STREAM_PERIOD)
+
+
 def _tmux_ls() -> List[str]:
     try:
         out = subprocess.check_output(["tmux", "ls"], stderr=subprocess.DEVNULL).decode()
@@ -376,6 +873,25 @@ def get_accounts(user: str = Depends(_auth)):
         return {"accounts": _list_accounts()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/accounts/pnl_range")
+def get_accounts_pnl_range(user: str = Depends(_auth)):
+    return {"start_ts": PNL_RANGE_OVERRIDE.get("start_ts"), "end_ts": PNL_RANGE_OVERRIDE.get("end_ts")}
+
+
+@app.post("/api/accounts/pnl_range")
+def set_accounts_pnl_range(payload: dict, user: str = Depends(_auth)):
+    start_ts = payload.get("start_ts")
+    end_ts = payload.get("end_ts")
+    start_val = int(start_ts) if isinstance(start_ts, (int, float)) else None
+    end_val = int(end_ts) if isinstance(end_ts, (int, float)) else None
+    PNL_RANGE_OVERRIDE["start_ts"] = start_val
+    PNL_RANGE_OVERRIDE["end_ts"] = end_val
+    for key in list(ACCOUNT_PNL_CACHE.keys()):
+        if key.startswith("LIGHTER:"):
+            ACCOUNT_PNL_CACHE.pop(key, None)
+    return {"ok": True, "start_ts": start_val, "end_ts": end_val}
 
 
 @app.post("/api/accounts")
@@ -491,19 +1007,35 @@ async def _db_watchdog_loop():
             return value
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else None
             except Exception:
                 return None
         if isinstance(value, (bytes, bytearray)):
             try:
-                return json.loads(value.decode())
+                parsed = json.loads(value.decode())
+                return parsed if isinstance(parsed, dict) else None
             except Exception:
                 return None
         return None
 
     def _format_inventory_lines(snapshot: dict | None) -> list[str]:
         snap = _normalize_inventory_snapshot(snapshot)
-        lines = ["Latest Inv"]
+        if not isinstance(snap, dict):
+            return [
+                "Latest Inv",
+                "V1     : — @ — | —",
+                "V2     : — @ — | —",
+                "Δ      : —",
+            ]
+
+        def _format_notional(qty, price) -> str:
+            try:
+                qty_val = float(qty)
+                price_val = float(price)
+                return f"${abs(qty_val) * price_val:.2f}"
+            except Exception:
+                return "—"
 
         qty_v1 = snap.get("qty_v1")
         price_v1 = snap.get("price_v1")
@@ -513,9 +1045,9 @@ async def _db_watchdog_loop():
 
         lines = [
             f"Latest Inv",
-            f"V1                    : {qty_v1 if qty_v1 is not None else '—'} @ {_format_price(price_v1)}",
-            f"V2                    : {qty_v2 if qty_v2 is not None else '—'} @ {_format_price(price_v2)}",
-            f"Δ                     : {f'{spread_inv:.2f}%' if spread_inv is not None else '—'}"
+            f"V1        : {qty_v1 if qty_v1 is not None else '—'} @ {_format_price(price_v1)} | {_format_notional(qty_v1, price_v1)}",
+            f"V2        : {qty_v2 if qty_v2 is not None else '—'} @ {_format_price(price_v2)} | {_format_notional(qty_v2, price_v2)}",
+            f"Δ         : {f'{spread_inv:.2f}%' if spread_inv is not None else '—'}"
         ]
         return lines
 
@@ -571,8 +1103,27 @@ async def _db_watchdog_loop():
             except Exception:
                 return None
 
-        for row in rows:
-            decision = _parse_trace_json(row.get("decision_data")) if row.get("decision_data") else {}
+        def _ensure_dict(value: any) -> dict:
+            parsed = _parse_trace_json(value)
+            return parsed if isinstance(parsed, dict) else {}
+
+        filtered_rows = [row for row in rows if hasattr(row, "get")]
+        if not filtered_rows:
+            return stats
+
+        raw_conf = _parse_trace_json(filtered_rows[0].get("bot_configs")) if filtered_rows[0].get("bot_configs") else {}
+        first_bot_conf = raw_conf if isinstance(raw_conf, dict) else {}
+        if first_bot_conf:
+            bot_name_override = first_bot_conf.get("botName") or first_bot_conf.get("bot_name")
+            if bot_name_override:
+                stats["bot_name"] = bot_name_override
+            venue1 = first_bot_conf.get("venue1") or venue1
+            venue2 = first_bot_conf.get("venue2") or venue2
+            stats["venue1"] = venue1 or "1"
+            stats["venue2"] = venue2 or "2"
+
+        for row in filtered_rows:
+            decision = _ensure_dict(row.get("decision_data"))
             if decision:
                 reason = (decision.get("reason") or "").upper()
                 direction = (decision.get("direction") or "").lower()
@@ -590,21 +1141,21 @@ async def _db_watchdog_loop():
                         stats["entries_2_1"] += 1
                     elif direction == "exit":
                         stats["exits_2_1"] += 1
-            trade1 = _parse_trace_json(row.get("trade_v1")) if row.get("trade_v1") else {}
+            trade1 = _ensure_dict(row.get("trade_v1"))
             if trade1:
                 stats["trades_1"] += 1
                 lat = _parse_number(trade1.get("lat"))
                 if lat is not None:
                     order_lat_sum_1 += lat
                     order_lat_cnt_1 += 1
-            trade2 = _parse_trace_json(row.get("trade_v2")) if row.get("trade_v2") else {}
+            trade2 = _ensure_dict(row.get("trade_v2"))
             if trade2:
                 stats["trades_2"] += 1
                 lat = _parse_number(trade2.get("lat"))
                 if lat is not None:
                     order_lat_sum_2 += lat
                     order_lat_cnt_2 += 1
-            fill1 = _parse_trace_json(row.get("fill_v1")) if row.get("fill_v1") else {}
+            fill1 = _ensure_dict(row.get("fill_v1"))
             if fill1:
                 stats["fills_1"] += 1
                 fill_ts = _parse_number(fill1.get("ts"))
@@ -612,7 +1163,7 @@ async def _db_watchdog_loop():
                 if fill_ts is not None and decision_ts is not None:
                     fill_lat_sum_1 += (fill_ts - decision_ts) * 1000
                     fill_lat_cnt_1 += 1
-            fill2 = _parse_trace_json(row.get("fill_v2")) if row.get("fill_v2") else {}
+            fill2 = _ensure_dict(row.get("fill_v2"))
             if fill2:
                 stats["fills_2"] += 1
                 fill_ts = _parse_number(fill2.get("ts"))
@@ -676,12 +1227,14 @@ async def _db_watchdog_loop():
                 await asyncio.sleep(WATCHDOG_PERIOD)
                 continue
             if not initial_sample_sent:
-                await _send_initial_activity_sample(symbols)
+                # await _send_initial_activity_sample(symbols)
                 initial_sample_sent = True
             now = datetime.now(tz=timezone.utc)
             since = now - timedelta(seconds=60)
             table_rows = []
             for item in symbols:
+                if not isinstance(item, dict):
+                    continue
                 sym_l = item.get("SYM_VENUE1")
                 sym_e = item.get("SYM_VENUE2")
                 if not sym_l or not sym_e:
@@ -690,7 +1243,7 @@ async def _db_watchdog_loop():
                 bot_name = item.get("name") or default_name
                 bot_id = item.get("id") or item.get("BOT_ID") or bot_name
                 stats = await db.recent_activity_stats(bot_id, since.timestamp())
-                if not stats:
+                if not stats or not isinstance(stats, dict):
                     continue
                 activity_count = sum(
                     stats.get(key, 0)
@@ -893,6 +1446,11 @@ async def _start_watchdog():
         asyncio.create_task(_db_watchdog_loop())
     else:
         print("[watchdog] disabled (set DB_WATCHDOG_ENABLED=true and TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
+    if ACCOUNT_STREAM_ENABLED:
+        print("[accounts] starting account stream")
+        asyncio.create_task(_account_stream_loop())
+    else:
+        print("[accounts] disabled (set ACCOUNT_STREAM_ENABLED=true)")
 
 
 def _read_log(symbolL: str, symbolE: str, fname: str, tail: int = 4000) -> str:
@@ -990,6 +1548,35 @@ async def websocket_logs(symbolL: str, symbolE: str, logname: str, websocket: We
     filename = allowed[logname]
     # poll-based stream works with prepend/overwrite handlers
     return await _ws_poll_stream(symbolL, symbolE, filename, websocket, token)
+
+
+@app.websocket("/ws/accounts")
+async def websocket_accounts(websocket: WebSocket, token: Optional[str] = None):
+    try:
+        if not token:
+            await websocket.close(code=1008)
+            return
+        _check_token(token)
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    ACCOUNT_STREAM_CLIENTS.add(websocket)
+    try:
+        if ACCOUNT_STREAM_STATE:
+            await websocket.send_text(json.dumps(ACCOUNT_STREAM_STATE))
+        while True:
+            await asyncio.sleep(30)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        ACCOUNT_STREAM_CLIENTS.discard(websocket)
 
 
 @app.get("/api/trades/{symbolL}/{symbolE}")

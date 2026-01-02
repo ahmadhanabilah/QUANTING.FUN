@@ -1,7 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, TrendingUp, Settings, ListChecks, LayoutDashboard, Power, Trash2 } from 'lucide-react';
-import { DecisionsTable } from './decisions-table';
-import { TradesTable } from './trades-table';
+import { Activity, Settings, LayoutDashboard, Power, Trash2 } from 'lucide-react';
 import { BotSettings } from './bot-settings';
 import { ActivitiesTable } from './activities-table';
 import { usePaginatedActivities } from '../hooks/use-paginated-activities';
@@ -17,10 +15,12 @@ const NUMBER_FIELDS = [
   'MIN_HITS',
   'SLIPPAGE',
   'ORDER_HEARTBEAT_INTERVAL',
+  'INV_LEVEL_TO_MULT',
+  'SPREAD_MULTIPLIER',
 ];
 const BOOL_FIELDS = ['TEST_MODE', 'DEDUP_OB', 'WARM_UP_ORDERS', 'ORDER_HEARTBEAT_ENABLED'];
 
-export type DetailTab = 'dashboard' | 'decisions' | 'trades' | 'activities' | 'settings';
+export type DetailTab = 'dashboard' | 'activities' | 'settings';
 
 interface BotDetailViewProps {
   bot: {
@@ -32,6 +32,20 @@ interface BotDetailViewProps {
     pair: string;
     profit24h: number;
     trades24h: number;
+    positionV1?: {
+      account?: string;
+      symbol?: string;
+      qty?: number;
+      entry?: number;
+      notional?: number | null;
+    };
+    positionV2?: {
+      account?: string;
+      symbol?: string;
+      qty?: number;
+      entry?: number;
+      notional?: number | null;
+    };
   };
   apiBase: string;
   authHeaders: Record<string, string>;
@@ -246,8 +260,6 @@ export function BotDetailView({
 
   const tabs = [
     { id: 'dashboard' as DetailTab, label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'decisions' as DetailTab, label: 'Decisions', icon: ListChecks },
-    { id: 'trades' as DetailTab, label: 'Trades', icon: TrendingUp },
     { id: 'activities' as DetailTab, label: 'Activities', icon: Activity },
     { id: 'settings' as DetailTab, label: 'Bot Settings', icon: Settings },
   ];
@@ -262,6 +274,34 @@ export function BotDetailView({
     maximumFractionDigits: 2,
   });
   const formattedTrades = (bot.trades24h ?? 0).toLocaleString();
+  const fmtNumber = (value?: number | null, digits = 6) => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (!Number.isFinite(value)) {
+      return String(value);
+    }
+    const str = value.toFixed(digits);
+    return str.replace(/\.?0+$/, (match) => (match.includes('.') ? '' : match));
+  };
+  const formatMoney = (value?: number | null) => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (!Number.isFinite(value)) {
+      return String(value);
+    }
+    return `$${value.toFixed(2)}`;
+  };
+  const formatPosition = (pos?: BotDetailViewProps['bot']['positionV1']) => {
+    if (!pos || (!pos.qty && !pos.entry && !pos.notional)) {
+      return '—';
+    }
+    const qty = fmtNumber(pos.qty, 6);
+    const entry = fmtNumber(pos.entry, 6);
+    const notional = formatMoney(pos.notional ?? null);
+    return `${qty} @ ${entry} | ${notional}`;
+  };
 
   return (
     <div className="flex flex-col min-h-[calc(100vh-200px)] min-h-0">
@@ -360,14 +400,24 @@ export function BotDetailView({
                 <p className="text-2xl font-semibold text-white">{formattedTrades}</p>
               </div>
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="border border-slate-800/70 rounded-xl p-6 bg-slate-950/60 flex flex-col justify-center min-h-[160px] gap-2 shadow-lg shadow-black/30">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Venue 1 Position</p>
+                <p className="text-xs text-slate-400">
+                  {bot.positionV1?.account || '—'} / {bot.positionV1?.symbol || '—'}
+                </p>
+                <p className="text-sm text-white">{formatPosition(bot.positionV1)}</p>
+              </div>
+              <div className="border border-slate-800/70 rounded-xl p-6 bg-slate-950/60 flex flex-col justify-center min-h-[160px] gap-2 shadow-lg shadow-black/30">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Venue 2 Position</p>
+                <p className="text-xs text-slate-400">
+                  {bot.positionV2?.account || '—'} / {bot.positionV2?.symbol || '—'}
+                </p>
+                <p className="text-sm text-white">{formatPosition(bot.positionV2)}</p>
+              </div>
+            </div>
           </div>
           </div>
-        )}
-        {activeTab === 'decisions' && (
-          <DecisionsTable botId={bot.pairId} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
-        )}
-        {activeTab === 'trades' && (
-          <TradesTable botId={bot.pairId} botName={bot.name} apiBase={apiBase} authHeaders={authHeaders} mode={mode} onModeChange={onModeChange} />
         )}
         {activeTab === 'activities' && (
           <div className="space-y-4">

@@ -10,6 +10,8 @@ type SymbolCfg = Record<string, any> & {
   VENUE2?: string;
   ACC_V1?: string;
   ACC_V2?: string;
+  INV_LEVEL_TO_MULT?: number;
+  SPREAD_MULTIPLIER?: number;
 };
 
 type BotSettingsProps = {
@@ -40,14 +42,59 @@ const descriptions: Record<string, string> = {
   SLIPPAGE: "Slippage applied to market TOTAL legs (as a decimal, e.g. 0.04 = 4%)",
   ORDER_HEARTBEAT_ENABLED: "Enable the 80% below bid send_market heartbeat",
   ORDER_HEARTBEAT_INTERVAL: "Interval (seconds) between heartbeat orders",
+  INV_LEVEL_TO_MULT: "Levels to scale through before hitting the ultimate spread cap",
+  SPREAD_MULTIPLIER: "Factor to grow MIN_SPREAD by at each inventory level",
 };
 
-const tips = [
-  "Account for venue fees when tuning MIN_SPREAD and SPREAD_TP.",
-  "Keep REPRICE_TICK low for fast venues, higher for noisy books.",
-  "Set MAX_POSITION_VALUE to guard against runaway exposure.",
-  "Use TEST_MODE to validate new pairs before going live.",
-];
+const formatDecimal = (value: number) => {
+  if (!Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  const precision = abs >= 1000 ? 0 : abs >= 100 ? 1 : abs >= 10 ? 2 : 4;
+  const formatted = value.toFixed(precision);
+  return precision > 0 ? formatted.replace(/\.?0+$/, "") : formatted;
+};
+
+const buildDcaTips = (draft: SymbolCfg) => {
+  const minSpread = Number(draft.MIN_SPREAD ?? 0);
+  const maxPosition = Number(draft.MAX_POSITION_VALUE ?? 0);
+  const rawLevels = Number(draft.INV_LEVEL_TO_MULT ?? 0);
+  const multiplier = Number(draft.SPREAD_MULTIPLIER ?? 1) || 1;
+  const levelCount = Math.max(0, Math.floor(rawLevels));
+
+  if (!levelCount || maxPosition <= 0) {
+    return [
+      {
+        range: `$0 - $${formatDecimal(maxPosition)}`,
+        spread: formatDecimal(minSpread),
+      },
+    ];
+  }
+
+  const step = maxPosition / levelCount;
+  if (!(step > 0) || !Number.isFinite(step)) {
+    return [
+      {
+        range: `$0 - $${formatDecimal(maxPosition)}`,
+        spread: formatDecimal(minSpread),
+      },
+    ];
+  }
+
+  const tips: { range: string; spread: string }[] = [];
+  for (let level = 0; level < levelCount; level += 1) {
+    const lower = level * step;
+    const upper = Math.min((level + 1) * step, maxPosition);
+    const lowerLabel = formatDecimal(level === 0 ? 0 : lower);
+    const upperLabel = formatDecimal(upper);
+    const spreadValue = minSpread * Math.pow(multiplier, level);
+    tips.push({
+      range: `$${lowerLabel} - $${upperLabel}`,
+      spread: formatDecimal(spreadValue),
+    });
+  }
+
+  return tips;
+};
 
 export function BotSettings({ pairLabel, draft, numberFields, boolFields, accountOptions, onNumberChange, onToggle, onReset, onSave, onSymbolChange }: BotSettingsProps) {
   const [saving, setSaving] = useState(false);
@@ -79,6 +126,12 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, accoun
         enabled: toBool((draft as any)[key]),
       })),
     [draft, boolFields]
+  );
+
+  const dcaTips = useMemo(
+    () =>
+      buildDcaTips(draft),
+    [draft.INV_LEVEL_TO_MULT, draft.MAX_POSITION_VALUE, draft.MIN_SPREAD, draft.SPREAD_MULTIPLIER]
   );
 
   async function handleSave() {
@@ -242,16 +295,28 @@ export function BotSettings({ pairLabel, draft, numberFields, boolFields, accoun
       <div className="p-5 bg-gradient-to-br from-blue-500/5 to-purple-500/5 border border-blue-500/20 rounded-xl">
         <h4 className="text-slate-200 text-sm mb-3 font-medium flex items-center gap-2">
           <span className="w-1 h-4 bg-gradient-to-b from-blue-500 to-purple-500 rounded-full" />
-          Strategy Tips - Arbitrage
+          DCA MIN_SPREAD Preview
         </h4>
-        <ul className="space-y-2 text-slate-400 text-sm">
-          {tips.map((tip, idx) => (
-            <li key={idx} className="flex items-start gap-2">
-              <span className="text-blue-400 mt-0.5">•</span>
-              <span>{tip}</span>
-            </li>
-          ))}
-        </ul>
+        <div className="overflow-x-auto">
+          <table className="w-full text-slate-400 text-sm table-fixed min-w-[360px] border border-slate-800 rounded-lg">
+            <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold border-b border-slate-800">Range</th>
+                <th className="px-3 py-2 text-left font-semibold border-b border-slate-800">MIN_SPREAD</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dcaTips.map((tip, idx) => {
+                return (
+                  <tr key={idx} className={idx % 2 === 0 ? "bg-slate-950/40" : ""}>
+                    <td className="px-3 py-2 text-xs font-medium text-white">{tip.range}</td>
+                    <td className="px-3 py-2 text-xs">{tip.spread}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

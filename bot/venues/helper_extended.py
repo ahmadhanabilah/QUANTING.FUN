@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Optional
 import time
@@ -16,6 +17,10 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 
 logger = logging.getLogger("EXT")
 logger.setLevel(logging.INFO)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ExtendedWS:
@@ -431,6 +436,7 @@ class ExtendedWS:
 
         try:
             logger.info("place_limit")
+            expire_time = _utc_now() + timedelta(hours=24)
             resp = await self._trading_client.place_order(
                 market_name=self.symbol,
                 amount_of_synthetic=qty,
@@ -438,6 +444,7 @@ class ExtendedWS:
                 side=side_enum,
                 post_only=True,
                 reduce_only=False,
+                expire_time=expire_time,
             )
             order_id = resp.data.id if resp and resp.data else None
             logger.info("limit order placed")
@@ -481,6 +488,7 @@ class ExtendedWS:
                 if http_logger and is_heartbeat:
                     http_logger.setLevel(logging.CRITICAL)
                 try:
+                    expire_time = _utc_now() + timedelta(hours=24)
                     resp = await self._trading_client.place_order(
                         market_name=self.symbol,
                         amount_of_synthetic=qty,
@@ -488,6 +496,7 @@ class ExtendedWS:
                         side=side_enum,
                         post_only=False,
                         reduce_only=False,
+                        expire_time=expire_time,
                     )
                 finally:
                     if http_logger and is_heartbeat and old_level is not None:

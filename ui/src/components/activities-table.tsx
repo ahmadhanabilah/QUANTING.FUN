@@ -120,6 +120,7 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
     const showToggle = Boolean(payloadStr || respStr);
     return (
       <div key={label} className="rounded-lg bg-slate-900/50 border border-slate-800/60 p-3 mb-2">
+        <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-2">{label}</p>
         <div className="space-y-1 text-xs">
           <p className="text-slate-300">
             <span className="text-slate-400">Start:</span> {formatTs(data.ts_start)}
@@ -250,14 +251,34 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
     );
   };
 
+  const resolveObPriceForFill = (
+    fill: Record<string, any> | null | undefined,
+    ob: Record<string, any> | null | undefined,
+  ) => {
+    const size = parseNumber(fill?.size);
+    if (!ob || size === null || size === 0) {
+      return null;
+    }
+    const raw = size > 0 ? ob.askPrice : ob.bidPrice;
+    return parseNumber(raw);
+  };
+
+  const formatObPriceForFill = (
+    fill: Record<string, any> | null | undefined,
+    ob: Record<string, any> | null | undefined,
+  ) => {
+    const obPrice = resolveObPriceForFill(fill, ob);
+    if (obPrice === null) {
+      return "—";
+    }
+    return formatDecimal(obPrice, 6);
+  };
+
   const formatSlippage = (fill: Record<string, any> | null | undefined, ob: Record<string, any> | null | undefined) => {
     const fillPrice = parseNumber(fill?.fill_price);
     const size = parseNumber(fill?.size);
-    if (!ob || fillPrice === null || size === null || size === 0) {
-      return "—";
-    }
-    const obPrice = size > 0 ? parseNumber(ob.askPrice) : parseNumber(ob.bidPrice);
-    if (obPrice === null || obPrice === 0) {
+    const obPrice = resolveObPriceForFill(fill, ob);
+    if (fillPrice === null || size === null || size === 0 || obPrice === null || obPrice === 0) {
       return "—";
     }
     const directionDiff = size > 0 ? fillPrice - obPrice : obPrice - fillPrice;
@@ -283,15 +304,18 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
       }
     }
     const slippageValue = formatSlippage(data, ob);
+    const obPriceValue = formatObPriceForFill(data, ob);
     const rows = [
       { label: "Time", value: formatTs(data.ts) },
       { label: "Size", value: data.size ?? "—" },
+      { label: "OB Price", value: obPriceValue },
       { label: "Fill Price", value: data.fill_price ?? "—" },
       { label: "Slippage", value: slippageValue },
       { label: "Latency", value: latencyValue },
     ];
     return (
       <div key={label} className="rounded-lg bg-slate-900/50 border border-slate-800/60 p-3 mb-2">
+        <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-2">{label}</p>
         {renderKeyValues(rows)}
       </div>
     );
@@ -345,10 +369,14 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
                 };
               };
               const decisionRows = [
-                { label: "Time", value: formatTs(decision?.ts) },
                 { label: "Reason", value: decision?.reason ?? "—" },
                 { label: "Direction", value: decision?.direction ?? "—" },
-                { label: "Size", value: decision?.size ?? "—" },
+                {
+                  label: "Size",
+                  value: (
+                    <span className="text-white font-semibold">{decision?.size ?? "—"}</span>
+                  ),
+                },
                 { label: "Spread Signal", value: decision?.spread_signal ?? "—" },
                 formatOb("OB V1", obV1),
                 formatOb("OB V2", obV2),
@@ -357,32 +385,45 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
               const symbolLine =
                 cfg?.SYM_VENUE1 && cfg?.SYM_VENUE2 ? `${cfg.SYM_VENUE1}/${cfg.SYM_VENUE2}` : null;
               const accountLine = [cfg?.ACC_V1, cfg?.ACC_V2].filter(Boolean).join(" / ");
+              const venue1Label = cfg?.venue1 ?? cfg?.VENUE1 ?? "Venue 1";
+              const venue2Label = cfg?.venue2 ?? cfg?.VENUE2 ?? "Venue 2";
               const configDetails = [
                 { label: "Bot ID", value: cfg?.botId ?? activity.bot_id ?? "—" },
-                { label: "Bot Name", value: cfg?.botName ?? "—" },
                 { label: "Venue 1", value: cfg?.venue1 ?? cfg?.VENUE1 ?? "—" },
                 { label: "Venue 2", value: cfg?.venue2 ?? cfg?.VENUE2 ?? "—" },
                 { label: "Account V1", value: cfg?.account_v1 ?? cfg?.ACC_V1 ?? "—" },
                 { label: "Account V2", value: cfg?.account_v2 ?? cfg?.ACC_V2 ?? "—" },
               ];
+              const botNameDisplay = cfg?.botName || activity.botName || "—";
+              const traceValue = activity.trace || "—";
               return (
                 <tr key={`${activity.bot_id ?? "bot"}-${activity.trace}`} className="border-t border-slate-800">
                   <td className="px-4 py-4 align-top w-[220px] max-w-[220px]">
-                    <p className="font-mono text-sm text-white break-all">{activity.trace || "—"}</p>
-                    {configDetails.map((item) => (
-                      <p key={item.label} className="text-[11px] text-slate-400 mt-1">
-                        {item.label}: {item.value}
-                      </p>
-                    ))}
-                    {symbolLine && (
-                      <p className="text-[11px] text-slate-400 mt-1">Symbol: {symbolLine}</p>
-                    )}
-                    {accountLine && (
-                      <p className="text-[11px] text-slate-400 mt-1">Accounts: {accountLine}</p>
-                    )}
+                    <div className="rounded-lg bg-slate-900/50 border border-slate-800/60 p-3 space-y-1">
+                      <p className="text-sm font-semibold text-white break-all">{botNameDisplay}</p>
+                      <p className="font-mono text-xs text-slate-400 break-all">{traceValue}</p>
+                      {configDetails.map((item) => (
+                        <p key={item.label} className="text-[11px] text-slate-400 mt-1">
+                          {item.label}: {item.value}
+                        </p>
+                      ))}
+                      {symbolLine && (
+                        <p className="text-[11px] text-slate-400 mt-1">Symbol: {symbolLine}</p>
+                      )}
+                      {accountLine && (
+                        <p className="text-[11px] text-slate-400 mt-1">Accounts: {accountLine}</p>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-4 align-top w-[260px]">
-                    {decision ? renderKeyValues(decisionRows) : <p className="text-xs text-slate-500">—</p>}
+                    {decision ? (
+                    <div className="rounded-lg bg-slate-900/50 border border-slate-800/60 p-3 space-y-1">
+                      <p className="text-xs text-slate-200 font-semibold">{formatTs(decision?.ts)}</p>
+                      {renderKeyValues(decisionRows)}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">—</p>
+                    )}
                   </td>
                   <td className="px-4 py-4 align-top w-[200px]">
                     {decision ? (
@@ -395,22 +436,22 @@ export function ActivitiesTable({ activities, sortFn, hasMore, isLoadingMore, on
                     )}
                   </td>
                   <td className="px-4 py-4 align-top w-[260px] max-w-[320px]">
-                    {renderTrades("Venue 1", tradesV1, `${activity.bot_id}-${activity.trace}-v1`) || (
+                    {renderTrades(venue1Label, tradesV1, `${activity.bot_id}-${activity.trace}-v1`) || (
                       <p className="text-xs text-slate-500">—</p>
                     )}
                   </td>
                   <td className="px-4 py-4 align-top w-[260px] max-w-[320px]">
-                    {renderTrades("Venue 2", tradesV2, `${activity.bot_id}-${activity.trace}-v2`) || (
+                    {renderTrades(venue2Label, tradesV2, `${activity.bot_id}-${activity.trace}-v2`) || (
                       <p className="text-xs text-slate-500">—</p>
                     )}
                   </td>
                   <td className="px-4 py-4 align-top w-[220px]">
-                    {renderFills("Venue 1", fillsV1, decision?.ts, obV1) || (
+                    {renderFills(venue1Label, fillsV1, decision?.ts, obV1) || (
                       <p className="text-xs text-slate-500">—</p>
                     )}
                   </td>
                   <td className="px-4 py-4 align-top w-[220px]">
-                    {renderFills("Venue 2", fillsV2, decision?.ts, obV2) || (
+                    {renderFills(venue2Label, fillsV2, decision?.ts, obV2) || (
                       <p className="text-xs text-slate-500">—</p>
                     )}
                   </td>

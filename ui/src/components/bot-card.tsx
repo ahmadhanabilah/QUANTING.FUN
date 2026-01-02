@@ -23,6 +23,25 @@ export function BotCard({ bot, onToggle, onView, onPin, pinned }: BotCardProps) 
   const isRunning = bot.status === 'running';
   const titleLabel = bot.name;
   const validId = bot.id && bot.id.length === 6 ? bot.id : '-';
+  const fmtNumber = (value?: number | null, digits = 4) => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (!Number.isFinite(value)) {
+      return String(value);
+    }
+    const str = value.toFixed(digits);
+    return str.replace(/\.?0+$/, (match) => (match.includes('.') ? '' : match));
+  };
+  const formatMoney = (value?: number | null) => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (!Number.isFinite(value)) {
+      return String(value);
+    }
+    return `$${value.toFixed(2)}`;
+  };
 
   return (
     <div

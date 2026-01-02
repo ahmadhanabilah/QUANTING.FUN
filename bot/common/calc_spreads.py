@@ -34,6 +34,8 @@ def calc_spreads(L, E, state=None):
     spreads["TM_LE"] = (eask - lask) / lask * 100 if eask and lask else None
     spreads["TM_EL"] = (lask - eask) / eask * 100 if lask and eask else None
 
+    # print(spreads, end="\r", flush=True)
+
     # inventory spread
     spreadInv = 0
     if l_qty > 0 and e_qty < 0 and l_entry:

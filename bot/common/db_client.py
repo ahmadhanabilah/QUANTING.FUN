@@ -440,95 +440,119 @@ class DBClient:
     async def recent_activity_stats(self, bot_id: str, since_ts: float):
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 """
-                select
-                    count(*) filter (
-                        where (decision_data->>'direction') = 'entry'
-                          and (decision_data->>'reason') = 'TT_LE'
-                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
-                    ) as entries_1_2,
-                    count(*) filter (
-                        where (decision_data->>'direction') = 'entry'
-                          and (decision_data->>'reason') = 'TT_EL'
-                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
-                    ) as entries_2_1,
-                    count(*) filter (
-                        where (decision_data->>'direction') = 'exit'
-                          and (decision_data->>'reason') = 'TT_LE'
-                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
-                    ) as exits_1_2,
-                    count(*) filter (
-                        where (decision_data->>'direction') = 'exit'
-                          and (decision_data->>'reason') = 'TT_EL'
-                          and coalesce((decision_data->>'ts')::double precision, 0) >= $2
-                    ) as exits_2_1,
-                    count(*) filter (
-                        where coalesce((trade_v1->>'ts_start')::double precision, 0) >= $2
-                    ) as trades_1,
-                    count(*) filter (
-                        where coalesce((trade_v2->>'ts_start')::double precision, 0) >= $2
-                    ) as trades_2,
-                    count(*) filter (
-                        where coalesce((fill_v1->>'ts')::double precision, 0) >= $2
-                    ) as fills_1,
-                    count(*) filter (
-                        where coalesce((fill_v2->>'ts')::double precision, 0) >= $2
-                    ) as fills_2,
-                    avg((trade_v1->>'lat')::double precision) filter (
-                        where coalesce((trade_v1->>'ts_start')::double precision, 0) >= $2
-                    ) as avg_lat_order_ms_1,
-                    avg((trade_v2->>'lat')::double precision) filter (
-                        where coalesce((trade_v2->>'ts_start')::double precision, 0) >= $2
-                    ) as avg_lat_order_ms_2,
-                    avg(((coalesce((fill_v1->>'ts')::double precision, 0) - (decision_data->>'ts')::double precision) * 1000)) filter (
-                        where coalesce((fill_v1->>'ts')::double precision, 0) >= $2
-                          and (decision_data->>'ts') is not null
-                    ) as avg_lat_fill_ms_1,
-                    avg(((coalesce((fill_v2->>'ts')::double precision, 0) - (decision_data->>'ts')::double precision) * 1000)) filter (
-                        where coalesce((fill_v2->>'ts')::double precision, 0) >= $2
-                          and (decision_data->>'ts') is not null
-                    ) as avg_lat_fill_ms_2,
-                    max(
-                        greatest(
-                            coalesce((decision_data->>'ts')::double precision, 0),
-                            coalesce((trade_v1->>'ts_start')::double precision, 0),
-                            coalesce((trade_v2->>'ts_start')::double precision, 0),
-                            coalesce((fill_v1->>'ts')::double precision, 0),
-                            coalesce((fill_v2->>'ts')::double precision, 0)
-                        )
-                    ) as latest_ts
+                select trace, decision_data, trade_v1, trade_v2, fill_v1, fill_v2
                 from traces
-                where bot_id = $1;
+                where bot_id = $1
+                  and coalesce((decision_data->>'ts')::double precision, 0) >= $2
+                order by coalesce((decision_data->>'ts')::double precision, 0) desc
                 """,
                 bot_id,
                 since_ts,
             )
-            latest_row = await conn.fetchrow(
-                """
-                select decision_data->'inv_after' as inv_after
-                from traces
-                where bot_id = $1 and decision_data->>'ts' is not null
-                order by (decision_data->>'ts')::double precision desc
-                limit 1;
-                """,
-                bot_id
-            )
-            if not row:
+        stats = {
+            "entries_1_2": 0,
+            "entries_2_1": 0,
+            "exits_1_2": 0,
+            "exits_2_1": 0,
+            "trades_1": 0,
+            "trades_2": 0,
+            "fills_1": 0,
+            "fills_2": 0,
+            "avg_lat_order_ms_1": None,
+            "avg_lat_order_ms_2": None,
+            "avg_lat_fill_ms_1": None,
+            "avg_lat_fill_ms_2": None,
+            "latest_inv_after": None,
+            "latest_inv_before": None,
+            "latest_decision_ts": None,
+        }
+        order_lat_sum_1 = order_lat_cnt_1 = 0
+        order_lat_sum_2 = order_lat_cnt_2 = 0
+        fill_lat_sum_1 = fill_lat_cnt_1 = 0
+        fill_lat_sum_2 = fill_lat_cnt_2 = 0
+        latest_ts = 0
+
+        def _parse_number(value: any) -> float | None:
+            try:
+                return float(value)
+            except Exception:
                 return None
-            return {
-                "entries_1_2": int(row["entries_1_2"] or 0),
-                "entries_2_1": int(row["entries_2_1"] or 0),
-                "exits_1_2": int(row["exits_1_2"] or 0),
-                "exits_2_1": int(row["exits_2_1"] or 0),
-                "trades_1": int(row["trades_1"] or 0),
-                "trades_2": int(row["trades_2"] or 0),
-                "fills_1": int(row["fills_1"] or 0),
-                "fills_2": int(row["fills_2"] or 0),
-                "avg_lat_order_ms_1": float(row["avg_lat_order_ms_1"]) if row.get("avg_lat_order_ms_1") is not None else None,
-                "avg_lat_order_ms_2": float(row["avg_lat_order_ms_2"]) if row.get("avg_lat_order_ms_2") is not None else None,
-                "avg_lat_fill_ms_1": float(row["avg_lat_fill_ms_1"]) if row.get("avg_lat_fill_ms_1") is not None else None,
-                "avg_lat_fill_ms_2": float(row["avg_lat_fill_ms_2"]) if row.get("avg_lat_fill_ms_2") is not None else None,
-                "latest_ts": float(row["latest_ts"] or 0),
-                "latest_inv_after": latest_row.get("inv_after") if latest_row else None,
-            }
+
+        def _parse_json(val):
+            if val is None:
+                return {}
+            if isinstance(val, dict):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+        for row in rows:
+            decision = _parse_json(row.get("decision_data"))
+            reason = (decision.get("reason") or "").upper()
+            direction = (decision.get("direction") or "").lower()
+            ts_val = _parse_number(decision.get("ts"))
+            if ts_val and ts_val > latest_ts:
+                latest_ts = ts_val
+                stats["latest_inv_after"] = decision.get("inv_after")
+                stats["latest_inv_before"] = decision.get("inv_before")
+                stats["latest_decision_ts"] = ts_val
+            if reason == "TT_LE":
+                if direction == "entry":
+                    stats["entries_1_2"] += 1
+                elif direction == "exit":
+                    stats["exits_1_2"] += 1
+            elif reason == "TT_EL":
+                if direction == "entry":
+                    stats["entries_2_1"] += 1
+                elif direction == "exit":
+                    stats["exits_2_1"] += 1
+
+            trade1 = _parse_json(row.get("trade_v1"))
+            if trade1:
+                stats["trades_1"] += 1
+                lat = _parse_number(trade1.get("lat"))
+                if lat is not None:
+                    order_lat_sum_1 += lat
+                    order_lat_cnt_1 += 1
+            trade2 = _parse_json(row.get("trade_v2"))
+            if trade2:
+                stats["trades_2"] += 1
+                lat = _parse_number(trade2.get("lat"))
+                if lat is not None:
+                    order_lat_sum_2 += lat
+                    order_lat_cnt_2 += 1
+
+            fill1 = _parse_json(row.get("fill_v1"))
+            if fill1:
+                stats["fills_1"] += 1
+                fill_ts = _parse_number(fill1.get("ts"))
+                if fill_ts is not None and ts_val is not None:
+                    fill_lat_sum_1 += (fill_ts - ts_val) * 1000
+                    fill_lat_cnt_1 += 1
+            fill2 = _parse_json(row.get("fill_v2"))
+            if fill2:
+                stats["fills_2"] += 1
+                fill_ts = _parse_number(fill2.get("ts"))
+                if fill_ts is not None and ts_val is not None:
+                    fill_lat_sum_2 += (fill_ts - ts_val) * 1000
+                    fill_lat_cnt_2 += 1
+
+        if order_lat_cnt_1:
+            stats["avg_lat_order_ms_1"] = order_lat_sum_1 / order_lat_cnt_1
+        if order_lat_cnt_2:
+            stats["avg_lat_order_ms_2"] = order_lat_sum_2 / order_lat_cnt_2
+        if fill_lat_cnt_1:
+            stats["avg_lat_fill_ms_1"] = fill_lat_sum_1 / fill_lat_cnt_1
+        if fill_lat_cnt_2:
+            stats["avg_lat_fill_ms_2"] = fill_lat_sum_2 / fill_lat_cnt_2
+        stats["latest_ts"] = latest_ts
+        if not rows:
+            return None
+        return stats

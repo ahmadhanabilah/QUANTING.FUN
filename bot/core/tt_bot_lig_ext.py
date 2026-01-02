@@ -1,4 +1,4 @@
-# PYTHONPATH=. .venv/bin/python -m bot.core.tt_bot BTC BTC-USD
+# PYTHONPATH=. .venv/bin/python -m bot.core.tt_bot_lig_ext BTC BTC-USD
 import asyncio
 import time
 import os
@@ -43,9 +43,9 @@ class TTBot:
         self.E                  = extended
         self.symbolL            = symbolL
         self.symbolE            = symbolE
-        self.minSpread          = minSpread
-        self.spreadTP           = spreadTP
-        self.max_position_value = max_position_value
+        self.minSpread          = float(minSpread)
+        self.spreadTP           = float(spreadTP)
+        self.max_position_value = self._safe_float(max_position_value)
         self.max_trade_value    = max_trade_value
         self.max_of_ob          = max_of_ob
 
@@ -74,6 +74,9 @@ class TTBot:
         self.bot_name           = f"TT:{self.symbolL}:{self.symbolE}"
         self.db_client          = None
         self._bot_config = bot_config or {}
+        self._inv_step_value_config = self._safe_float(self._bot_config.get("INV_STEP_VALUE"))
+        self._inv_level_to_mult = max(int(self._safe_float(self._bot_config.get("INV_LEVEL_TO_MULT", 1)) or 1), 1)
+        self.spread_multiplier = max(self._safe_float(self._bot_config.get("SPREAD_MULTIPLIER", 1.0)) or 1.0, 1.0)
         bot_id_val = str(
             self._bot_config.get("BOT_ID")
             or self._bot_config.get("id")
@@ -105,6 +108,56 @@ class TTBot:
         self._heartbeat_ready_E = not heartbeat_enabled
         self._heartbeat_ready_logged = False
         self.slippage = slippage
+        self._last_entry_level = 0
+        self._last_entry_min_spread = self.minSpread
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _venue_key_from_name(venue_name: str | None) -> str | None:
+        if not venue_name:
+            return None
+        val = str(venue_name).strip().upper()
+        if not val:
+            return None
+        if val == "L" or "LIGHTER" in val or val.startswith("LIG"):
+            return "L"
+        if val == "E" or "EXTENDED" in val or val.startswith("EXT"):
+            return "E"
+        return None
+
+    def _venue_keys_v1_v2(self) -> tuple[str, str]:
+        venue1_name = (
+            self._bot_config_payload.get("venue1")
+            or self._bot_config.get("VENUE1")
+            or "LIGHTER"
+        )
+        venue2_name = (
+            self._bot_config_payload.get("venue2")
+            or self._bot_config.get("VENUE2")
+            or "EXTENDED"
+        )
+        v1_key = self._venue_key_from_name(venue1_name)
+        v2_key = self._venue_key_from_name(venue2_name)
+        if v1_key in ("L", "E") and v2_key in ("L", "E") and v1_key != v2_key:
+            return v1_key, v2_key
+        # Fallback to legacy assumption: v1=Lighter, v2=Extended
+        return "L", "E"
+
+    def _inv_tuple_to_v1_v2(self, inv_data):
+        if not inv_data or not isinstance(inv_data, (list, tuple)) or len(inv_data) < 4:
+            return inv_data
+        l_qty, l_price, e_qty, e_price = inv_data[:4]
+        v1_key, _ = self._venue_keys_v1_v2()
+        if v1_key == "L":
+            return (l_qty, l_price, e_qty, e_price)
+        return (e_qty, e_price, l_qty, l_price)
 
     def _log_state_update(self, source: str, *, inv_l=None, price_l=None, inv_e=None, price_e=None):
         """Log inventory/price state mutations for traceability."""
@@ -128,6 +181,30 @@ class TTBot:
                 logger_tt.info("[STATE UPDATE] %s %s", source, " | ".join(parts))
         except Exception:
             pass
+
+    def _current_inventory_value(self) -> float:
+        inv_l = getattr(self.state, "invL", 0) or 0
+        inv_e = getattr(self.state, "invE", 0) or 0
+        price_l = getattr(self.state, "priceInvL", getattr(self.state, "entry_price_L", 0)) or 0
+        price_e = getattr(self.state, "priceInvE", getattr(self.state, "entry_price_E", 0)) or 0
+        return max(abs(inv_l * price_l), abs(inv_e * price_e))
+
+    def _inv_step_from_config(self) -> float:
+        if self._inv_step_value_config > 0:
+            return self._inv_step_value_config
+        if self.max_position_value > 0 and self._inv_level_to_mult > 0:
+            return self.max_position_value / self._inv_level_to_mult
+            return 0.0
+
+    def _compute_dynamic_entry_spread(self) -> tuple[float, int]:
+        step_value = self._inv_step_from_config()
+        if self.max_position_value > 0 and step_value > 0:
+            inv_value = self._current_inventory_value()
+            inv_level = int(inv_value // step_value)
+            inv_level = min(inv_level, self._inv_level_to_mult)
+            min_spread = self.minSpread * (self.spread_multiplier ** inv_level)
+            return min_spread, inv_level
+        return self.minSpread, 0
 
     async def loop(self):
         """Call this on every OB update."""
@@ -217,6 +294,23 @@ class TTBot:
         # 1) spreads
         spreads = calc_spreads(self.L, self.E, self.state)
         self._last_spreads = spreads
+        try:
+            l_qty = getattr(self.state, "invL", 0.0)
+            e_qty = getattr(self.state, "invE", 0.0)
+            l_entry = getattr(self.state, "entry_price_L", 0.0)
+            e_entry = getattr(self.state, "entry_price_E", 0.0)
+            inv_spread = 0.0
+            if l_qty > 0 and e_qty < 0 and l_entry:
+                inv_spread = (e_entry - l_entry) / l_entry * 100
+            elif l_qty < 0 and e_qty > 0 and e_entry:
+                inv_spread = (l_entry - e_entry) / e_entry * 100
+            print(
+                f"TT_LE:{spreads.get('TT_LE')} TT_EL:{spreads.get('TT_EL')} InvSpread:{inv_spread:.4f}%",
+                end="\r",
+                flush=True,
+            )
+        except Exception:
+            pass
 
         # pre-compute TT size hints for pricing/logging
         size_hint_le = None
@@ -230,10 +324,13 @@ class TTBot:
         # 2) decision
         ob_snapshot_L = dict(self.L.ob)
         ob_snapshot_E = dict(self.E.ob)
+        min_spread_to_entry, inv_level = self._compute_dynamic_entry_spread()
+        self._last_entry_min_spread = min_spread_to_entry
+        self._last_entry_level = inv_level
         decision, decision_ts = logic_entry_exit(
             self.state,
             spreads,
-            self.minSpread,
+            min_spread_to_entry,
             self.spreadTP,
             self.L.ob,
             self.E.ob,
@@ -909,20 +1006,20 @@ class TTBot:
             fill_ts_short = getattr(self.state, "last_fill_ts_E", None) or time.time()
             fill_price_long = getattr(self.state, "last_fill_price_L", None)
             fill_price_short = getattr(self.state, "last_fill_price_E", None)
-            await self._push_fill_db(
-                trace=trace_val,
-                venue=venue_long,
-                ts=fill_ts_long,
-                size=base_qty_long,
-                fill_price=fill_price_long,
-            )
-            await self._push_fill_db(
-                trace=trace_val,
-                venue=venue_short,
-                ts=fill_ts_short,
-                size=base_qty_short,
-                fill_price=fill_price_short,
-            )
+            size_by_venue = {
+                "L": base_qty_long if venue_long == "L" else base_qty_short,
+                "E": base_qty_long if venue_long == "E" else base_qty_short,
+            }
+            ts_by_venue = {"L": fill_ts_long, "E": fill_ts_short}
+            price_by_venue = {"L": fill_price_long, "E": fill_price_short}
+            for venue_key in ("L", "E"):
+                await self._push_fill_db(
+                    trace=trace_val,
+                    venue=venue_key,
+                    ts=ts_by_venue[venue_key],
+                    size=size_by_venue[venue_key],
+                    fill_price=price_by_venue[venue_key],
+                )
         else:
             logger_db.warning("[ERROR INSERT FILL]")
         if getattr(self.state, "warm_up_orders", False) and ctx.get("reason") in ("WARM_UP_LE", "WARM_UP_EL"):
@@ -998,10 +1095,15 @@ class TTBot:
             "spread_signal": ctx.get("spread_signal"),
             "size": ctx.get("qty"),
         }
-        decision_data["inv_before"] = _format_inv(ctx.get("inv_before"))
-        decision_data["inv_after"] = _format_inv(inv_after)
-        ob_v1 = _ob_snapshot(ctx.get("ob_snapshot_L") or self.L.ob)
-        ob_v2 = _ob_snapshot(ctx.get("ob_snapshot_E") or self.E.ob)
+        decision_data["inv_before"] = _format_inv(self._inv_tuple_to_v1_v2(ctx.get("inv_before")))
+        decision_data["inv_after"] = _format_inv(self._inv_tuple_to_v1_v2(inv_after))
+        v1_key, v2_key = self._venue_keys_v1_v2()
+        ob_by_venue = {
+            "L": ctx.get("ob_snapshot_L") or self.L.ob,
+            "E": ctx.get("ob_snapshot_E") or self.E.ob,
+        }
+        ob_v1 = _ob_snapshot(ob_by_venue.get(v1_key))
+        ob_v2 = _ob_snapshot(ob_by_venue.get(v2_key))
         db = await self._get_db_client()
         if not db:
             return
@@ -1359,7 +1461,13 @@ class TTBot:
         return shared
 
     def _trace_section_name(self, prefix: str, venue_key: str) -> str:
-        suffix = "v1" if venue_key == "L" else "v2"
+        v1_key, v2_key = self._venue_keys_v1_v2()
+        if venue_key == v1_key:
+            suffix = "v1"
+        elif venue_key == v2_key:
+            suffix = "v2"
+        else:
+            suffix = "v1" if venue_key == "L" else "v2"
         return f"{prefix}_{suffix}"
 
     async def _get_db_client(self):
@@ -1382,9 +1490,10 @@ class TTBot:
 
 
 def _load_env_files():
-    def _load_from(path: Path):
+    def _load_from(path: Path, *, force: bool = False, skip_prefixes: tuple[str, ...] = ()) -> list[str]:
         if not path.exists():
-            return
+            return []
+        loaded = []
         with path.open() as f:
             for raw in f:
                 line = raw.strip()
@@ -1393,14 +1502,28 @@ def _load_env_files():
                 k, v = line.split("=", 1)
                 k = k.strip()
                 v = v.strip().strip('"').strip("'")
-                if k and k not in os.environ:
+                if skip_prefixes and any(k.startswith(prefix) for prefix in skip_prefixes):
+                    continue
+                if k and (force or k not in os.environ):
                     os.environ[k] = v
+                    loaded.append(k)
+        return loaded
 
-    _load_from(PROJECT_ROOT / ".env_server")
+    force_prefixes = ("LIGHTER_", "EXTENDED_")
+    cleared = [key for key in os.environ.keys() if key.startswith(force_prefixes)]
+    for key in cleared:
+        os.environ.pop(key, None)
+    if cleared:
+        print(f"[ENV] cleared inherited: {', '.join(cleared)}", flush=True)
+    loaded_server = _load_from(PROJECT_ROOT / ".env_server", skip_prefixes=force_prefixes)
+    if loaded_server:
+        print(f"[ENV] loaded from .env_server: {', '.join(loaded_server)}", flush=True)
     env_dir = PROJECT_ROOT / "env"
     if env_dir.exists():
         for env_path in sorted(env_dir.glob(".env_*")):
-            _load_from(env_path)
+            loaded_env = _load_from(env_path, force=True)
+            if loaded_env:
+                print(f"[ENV] loaded from {env_path.name}: {', '.join(loaded_env)}", flush=True)
 
 
 def _strip_sym_val(raw: str | None) -> str:
