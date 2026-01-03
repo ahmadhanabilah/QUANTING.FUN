@@ -35,13 +35,18 @@ apt_install() {
 }
 
 echo "[bootstrap] Installing system packages..."
-apt_install python3-venv python3-pip git tmux curl nodejs npm postgresql postgresql-contrib
+apt_install python3-venv python3-pip git tmux curl nodejs postgresql postgresql-contrib
 
 echo "[bootstrap] Setting up Python venv..."
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "[bootstrap] npm is missing; ensure your Node install provides it (NodeSource nodejs includes npm)."
+  exit 1
+fi
 
 echo "[bootstrap] Installing UI deps (with Tailwind)..."
 cd "$ROOT/ui"
@@ -141,7 +146,8 @@ else
       "MIN_HITS": 1,
       "TEST_MODE": false,
       "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false
+      "WARM_UP_ORDERS": false,
+      "LIGHTER_SPOT": false
     }
   ]
 }
