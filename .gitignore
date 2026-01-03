@@ -9,6 +9,7 @@ scripts/csv/
 .env_ui
 config.json
 __pycache__/
+env/
 *.pyc
 ui/build/
 *.csv
