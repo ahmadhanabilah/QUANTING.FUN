@@ -5,7 +5,7 @@ set -euo pipefail
 # - Installs system deps (Python, Node, Tailwind toolchain, PostgreSQL, tmux).
 # - Creates venv + pip deps.
 # - Installs UI deps (including Tailwind).
-# - Writes .env_server, .env_bot, config.json (single NEW/NEW-USD pair).
+# - Writes .env_server, .env_bot.
 # - Creates databases arb_bot and arb_bot_test if PostgreSQL is available.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,66 +93,8 @@ DB_WATCHDOG_PERIOD=60
 EOF
 fi
 
-echo "[bootstrap] Creating env account files..."
-mkdir -p env
-if [ -f env/.env_LIG_MAIN ]; then
-  echo "[bootstrap] env/.env_LIG_MAIN exists; skipping overwrite"
-else
-  cat > env/.env_LIG_MAIN <<EOF
-# Lighter venue (LIG_MAIN)
-LIGHTER_API_PRIVATE_KEY=
-LIGHTER_ACCOUNT_INDEX=
-LIGHTER_API_KEY_INDEX=
-EOF
-fi
-if [ -f env/.env_EXT_MAIN ]; then
-  echo "[bootstrap] env/.env_EXT_MAIN exists; skipping overwrite"
-else
-  cat > env/.env_EXT_MAIN <<EOF
-# Extended venue (EXT_MAIN)
-EXTENDED_VAULT_ID=
-EXTENDED_PRIVATE_KEY=
-EXTENDED_PUBLIC_KEY=
-EXTENDED_API_KEY=
-EOF
-fi
-if [ -f env/.env_HYP_MAIN ]; then
-  echo "[bootstrap] env/.env_HYP_MAIN exists; skipping overwrite"
-else
-  cat > env/.env_HYP_MAIN <<EOF
-# Hyperliquid account (HYP_MAIN)
-API_ADDRESS=
-API_PRIVATE_KEY=
-EOF
-fi
-
-echo "[bootstrap] Writing config.json (single NEW/NEW-USD pair)..."
-if [ -f config.json ]; then
-  echo "[bootstrap] config.json exists; skipping overwrite"
-else
-  cat > config.json <<'EOF'
-{
-  "symbols": [
-    {
-      "SYM_VENUE1": "NEW",
-      "SYM_VENUE2": "NEW-USD",
-      "MIN_SPREAD": 0.3,
-      "SPREAD_TP": 0.2,
-      "REPRICE_TICK": 0,
-      "MAX_POSITION_VALUE": 200,
-      "MAX_TRADE_VALUE": 25,
-      "MAX_OF_OB": 0.3,
-      "MAX_TRADES": null,
-      "MIN_HITS": 1,
-      "TEST_MODE": false,
-      "DEDUP_OB": true,
-      "WARM_UP_ORDERS": false,
-      "LIGHTER_SPOT": false
-    }
-  ]
-}
-EOF
-fi
+echo "[bootstrap] Skipping env account file creation (env/)."
+echo "[bootstrap] Skipping config.json creation."
 
 echo "[bootstrap] Creating PostgreSQL databases (if server running)..."
 create_db_cmds="
